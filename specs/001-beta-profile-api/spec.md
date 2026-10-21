@@ -153,7 +153,7 @@ historial — verificable sin las decisiones de presentación del perfil.
   contiene los datos del usuario pero NUNCA credenciales de sesión.
 - **FR-004**: El sistema MUST crear el perfil profesional del usuario en el momento
   de la verificación de email, garantizando exactamente un perfil por cuenta; el
-  `full_name` obligatorio se inicializa con el placeholder genérico "Usuario" hasta
+  `full_name` obligatorio se inicializa con el placeholder genérico "User" hasta
   que el usuario lo actualice (ver Clarifications).
 - **FR-005**: El sistema MUST ofrecer reenvío de verificación con límites por
   usuario y IP para impedir abuso del envío de mensajes.
@@ -261,8 +261,10 @@ historial — verificable sin las decisiones de presentación del perfil.
 - Beta dirigida a un público pequeño/modesto (≤ 1k usuarios) antes de decisiones de
   escalado; los límites actuales (10 versiones, 50 KB, rate limits) se fijan como
   valores iniciales y son ajustables por configuración.
-- Idioma de los mensajes de usuario: español; el contrato de errores es agnóstico
-  del idioma (tipos + status).
+- Idioma de los mensajes de usuario: inglés (los payloads de la API —`title`,
+  `detail` y valores de extensión— van en inglés, igual que el código; la
+  documentación del proyecto permanece en español); el contrato de errores es
+  agnóstico del idioma (tipos + status).
 
 ## Clarifications
 
@@ -270,7 +272,7 @@ historial — verificable sin las decisiones de presentación del perfil.
 
 - Q: ¿Qué valor inicial tiene el campo obligatorio `full_name` al crear el perfil
   automáticamente en la verificación de email (FR-004)? → A: Placeholder genérico
-  fijo "Usuario" (idéntico para todos) hasta que el usuario lo actualice en
+  fijo "User" (idéntico para todos) hasta que el usuario lo actualice en
   `PUT /v1/profile`; mantiene la restricción no-nula sin inventar datos.
 - Q: Si dos peticiones autenticadas del mismo usuario escriben su CV o perfil de
   forma casi simultánea, ¿cómo se resuelve el conflicto? → A: Concurrency optimista

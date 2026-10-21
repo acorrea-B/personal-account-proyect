@@ -21,7 +21,7 @@ reglas de validación y transiciones de estado.
 |-------|------|-------|
 | id | uuid PK | FK a auth.users, cascade |
 | email | text not null | espejo normalizado (lowercase+trim, D4/ADR 0006); índice único `lower(email)` |
-| full_name | text not null | 1..200 chars tras trim; required en `PUT /v1/profile`; inicial: placeholder "Usuario" (Clarifications Q1) |
+| full_name | text not null | 1..200 chars tras trim; required en `PUT /v1/profile`; inicial: placeholder "User" (Clarifications Q1) |
 | headline | text | ≤ 120 chars |
 | bio | text | ≤ 2000 chars |
 | location | text | ≤ 120 chars |
@@ -33,7 +33,7 @@ reglas de validación y transiciones de estado.
 Validación: estructural en Rust (R3) — la DB solo valida tipo jsonb. Creación en el
 momento de confirmación de email (FR-004) vía **trigger de DB sobre `auth.users`
 (AFTER UPDATE OF email_confirmed_at WHEN NEW.email_confirmed_at IS NOT NULL)` →
-insert espejo con email normalizado y `full_name="Usuario"` (Clarifications Q1) —
+insert espejo con email normalizado y `full_name="User"` (Clarifications Q1) —
 mecanismo elegido en research R11 (testeable en Supabase local, sin webhooks)
 
 ### 3. cv_texts (versión vigente)
