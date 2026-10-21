@@ -12,13 +12,17 @@ Cada respuesta de error: `Content-Type: application/problem+json`.
   "type": "https://api.<dominio>/errors/<slug>",
   "title": "<title>",
   "status": <status>,
-  "detail": "<mensaje en español>",
+  "detail": "<message in English>",
   "instance": "<ruta solicitada>"
 }
 ```
 
 Extensiones permitidas donde la tabla lo indica (p. ej. `can_resend`). Sin stack traces
 ni mensajes técnicos internos jamás (§13.4). 500 siempre usa el mismo detalle genérico.
+
+**Idioma**: los valores que ve el cliente (`title`, `detail` y valores de extensión)
+van en inglés; la documentación de este catálogo, en español. Los `title` de la tabla
+son ya literales del contrato y no se traducen.
 
 ## Catálogo canónico
 
@@ -37,7 +41,7 @@ ni mensajes técnicos internos jamás (§13.4). 500 siempre usa el mismo detalle
 | `email-exists` | 409 | Email Already Registered | registro con email ya usado (case-insensitive, FR-002) | — |
 | `stale-version` | 412 | Precondition Failed | escritura optimista: recurso cambió desde la última lectura del cliente (version = `updated_at`, header `If-Unmodified-Since`) — nada se archiva ni sobrescribe | `current_updated_at` |
 | `cv-too-large` | 413 | CV Too Large | contenido > 51200 bytes (FR-015) | `max_bytes: 51200` |
-| `weak-password` | 422 | Weak Password | registro: no cumple requisitos publicados (R4) | `requirements: ["longitud ≥ 8", "≥ 1 letra", "≥ 1 número"]` |
+| `weak-password` | 422 | Weak Password | registro: no cumple requisitos publicados (R4) | `requirements: ["length ≥ 8", "≥ 1 letter", "≥ 1 number"]` |
 | `email-malformed` | 422 | Malformed Email | registro/reenvío: formato de email inválido | — |
 | `profile-invalid-field` | 422 | Profile Validation Failed | PUT perfil: campo(s) inválidos | `fields: { "<campo>": "<motivo>" }` |
 | `cv-invalid-encoding` | 422 | CV Invalid Encoding | texto no UTF-8 válido (FR-015) | — |

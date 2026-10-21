@@ -112,7 +112,7 @@ post-incidente estandarizada. Tabla `audit_events` diferida (aditiva).
 **Decision**: trigger de base de datos sobre `auth.users` —
 `AFTER UPDATE OF email_confirmed_at ... WHEN (NEW.email_confirmed_at IS NOT NULL)` —
 que inserta el `profiles` espejo con email normalizado y `full_name` placeholder
-"Usuario" (Clarifications Q1). Un único trigger (T003), testeable en Supabase local y
+"User" (Clarifications Q1). Un único trigger (T003), testeable en Supabase local y
 en la suite (T013), sin webhooks ni código de aplicación en la ruta de verificación.
 **Rationale**: garantiza el espejo sin acoplar verify↔API, opera aunque la
 confirmación llegue de rutas no propias (ej. admin), y mantiene FR-019 por diseño.
