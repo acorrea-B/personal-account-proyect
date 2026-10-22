@@ -10,6 +10,7 @@
 
 pub mod clients;
 pub mod config;
+pub mod db;
 pub mod errors;
 pub mod events;
 pub mod middleware;
