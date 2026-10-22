@@ -23,7 +23,8 @@ rustc-ice-*.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Deployment tooling (Serverless Framework / osls)
-node_modules/
-.serverless/
+# Deployment tooling (Terraform: plan §12.2)
+infra/.terraform/
+infra/*.tfstate*
+infra/plan.txt
 

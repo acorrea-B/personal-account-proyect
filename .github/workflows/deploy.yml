@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy the api function
+    name: Deploy the api function with Terraform
     runs-on: ubuntu-latest
     # Protected environments (repository settings): production requires a
     # manual approval.
@@ -33,17 +33,19 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        github.event.workflow_run.conclusion == 'success') }}
     env:
-      ENVIRONMENT_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
       DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-      # Credentials of Scaleway (environment secrets).
-      SCW_ACCESS_KEY: ${{ secrets.SCALEWAY_ACCESS_KEY }}
-      SCW_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
-      SCW_DEFAULT_PROJECT_ID: ${{ vars.SCALEWAY_PROJECT_ID }}
-      SCW_DEFAULT_REGION: ${{ vars.SCALEWAY_REGION }}
-      # Non-secret configuration of the function (plan §12.2). The secrets of
-      # the function are attached out of the pipeline (Scaleway console or
-      # Terraform with SOPS): they never travel through GitHub.
-      PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+      ENVIRONMENT_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
+      # Scaleway credentials. The API provider (scaleway/terraform) talks to
+      # the REST API with the secret key alone; the S3 backend that stores the
+      # state needs the whole key pair, hence SCALEWAY_ACCESS_KEY.
+      SCW_SECRET_KEY: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      # Non-secret configuration of the function (plan §12.2) -> terraform
+      # vars of the same snake_case name. The secrets of the function are
+      # attached out of the pipeline (Scaleway console or Terraform with
+      # SOPS): they never travel through GitHub — Terraform does not declare
+      # secret_environment_variables and never touches them.
       ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
       MAX_BODY_BYTES: ${{ vars.MAX_BODY_BYTES }}
       REQUEST_TIMEOUT_SECS: ${{ vars.REQUEST_TIMEOUT_SECS }}
@@ -54,39 +56,58 @@ jobs:
       RATE_LIMIT_REQUEST_PER_MIN: ${{ vars.RATE_LIMIT_REQUEST_PER_MIN }}
       CV_MAX_BYTES: ${{ vars.CV_MAX_BYTES }}
       CV_VERSIONS_RETENTION: ${{ vars.CV_VERSIONS_RETENTION }}
+      # Optional: explicit target of the smoke test; by default it reads the
+      # `function_endpoint` output of Terraform.
+      PUBLIC_URL: ${{ vars.PUBLIC_URL }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.DEPLOY_SHA }}
 
-      - name: Install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - name: Package the function sources
+        run: ./package.sh
 
-      - name: Install the deployment tooling
-        run: npm install --no-audit --no-fund
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '~1.10.0'
+          terraform_wrapper: false
+
+      - name: Initialize Terraform
+        working-directory: infra
+        run: terraform init -no-color
+
+      # One workspace per environment: its own state, so staging and
+      # production never share resources.
+      - name: Select the workspace
+        working-directory: infra
+        run: terraform workspace select -or-create "$ENVIRONMENT_NAME"
 
       # The migration step (R10) lands with the `migrate` function (T003):
-      # deploy the function, invoke it and update `api` only on a 200.
-      - name: Deploy the function
-        run: npx osls deploy --stage "$ENVIRONMENT_NAME" | tee deploy.log
+      # apply it first, invoke it and only apply `api` on a 200 (plan §12.2).
+      - name: Apply
+        working-directory: infra
+        run: |
+          set -euo pipefail
+          VARS_ARGS=()
+          for name in ALLOWED_ORIGINS MAX_BODY_BYTES REQUEST_TIMEOUT_SECS \
+            DB_MAX_CONNECTIONS RATE_LIMIT_LOGIN_PER_MIN \
+            RATE_LIMIT_RESEND_PER_10MIN RATE_LIMIT_CV_WRITE_PER_MIN \
+            RATE_LIMIT_REQUEST_PER_MIN CV_MAX_BYTES CV_VERSIONS_RETENTION; do
+            VARS_ARGS+=("-var" "${name,,}=$(printenv "$name")")
+          done
+          terraform apply -auto-approve -input=false -no-color \
+            -var "stage=$ENVIRONMENT_NAME" "${VARS_ARGS[@]}"
 
       - name: Record the deployed version
         run: |
-          echo "Deployed \`${{ env.DEPLOY_SHA }}\` to $ENVIRONMENT_NAME." >> "$GITHUB_STEP_SUMMARY"
+          echo "Deployed \`${DEPLOY_SHA}\` to $ENVIRONMENT_NAME." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke test
+        working-directory: infra
         run: |
           set -euo pipefail
-          URL="${PUBLIC_URL:-}"
-          if [ -z "$URL" ]; then
-            URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.scw\.cloud' deploy.log | head -n 1 || true)
-          fi
-          if [ -z "$URL" ]; then
-            echo "::error::the public URL of the function could not be determined"
-            exit 1
-          fi
+          URL="${PUBLIC_URL:-$(terraform output -raw function_endpoint)}"
           for attempt in $(seq 1 10); do
             if curl --silent --fail --max-time 10 "$URL/health" | grep --quiet '^ok$'; then
               echo "The function answers at $URL/health"
