@@ -114,6 +114,13 @@ impl Config {
     pub fn allowed_origins(&self) -> &[String] {
         &self.allowed_origins
     }
+
+    /// The issuer to enforce on the credentials: `None` when the SUPABASE
+    /// does not emit it (legacy gotrue; the verification skips it).
+    pub fn issuer_to_verify(&self) -> Option<&str> {
+        let issuer = self.supabase_jwt_issuer.trim();
+        if issuer.is_empty() { None } else { Some(issuer) }
+    }
 }
 
 fn var(key: &str) -> Option<String> {

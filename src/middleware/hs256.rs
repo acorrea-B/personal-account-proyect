@@ -19,9 +19,14 @@ pub struct Hs256Verifier {
 }
 
 impl Hs256Verifier {
-    pub fn new(secret: &str, issuer: &str, audience: &str) -> Self {
+    /// `issuer`: Some = the credentials always carry it and must coincide;
+    /// None = the issuer of Supabase is not emitted (the legacy gotrue
+    /// tokens have no iss claim) — the verification skips it.
+    pub fn new(secret: &str, issuer: Option<&str>, audience: &str) -> Self {
         let mut validation = Validation::new(Algorithm::HS256);
-        validation.set_issuer(&[issuer.to_string()]);
+        if let Some(issuer) = issuer {
+            validation.set_issuer(&[issuer.to_string()]);
+        }
         validation.set_audience(&[audience.to_string()]);
         Self {
             decoding_key: DecodingKey::from_secret(secret.as_bytes()),
