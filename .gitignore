@@ -28,3 +28,8 @@ infra/.terraform/
 infra/*.tfstate*
 infra/plan.txt
 
+# Local secrets (development/Supabase local): never in the repo
+.env
+.env.*
+!.env.example
+
