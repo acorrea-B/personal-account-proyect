@@ -6,7 +6,9 @@
 # Mismos patterns que tenía el serverless.yml: Cargo.toml, Cargo.lock,
 # src/** y migrations/** — excluye src/main.rs (servidor de desarrollo local).
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# The script of the repository root: `dirname` is enough (the `/..` went out
+# of the repository — zip answered 'Nothing to do!' and the CI failed).
+cd "$(dirname "$0")"
 
 rm -f infra/function.zip
 

@@ -41,7 +41,7 @@ locals {
   }
 }
 
-# Un namespace por entorno: `perfil-api-staging` y `perfil-api-production`.
+# Un namespace: `perfil-api-production` (D16 — staging no existe).
 resource "scaleway_function_namespace" "perfil" {
   name   = "perfil-api-${var.stage}"
   region = var.scw_region

@@ -65,7 +65,7 @@ impl RateLimitLayer {
                 rates,
                 verifier: Arc::new(crate::middleware::hs256::Hs256Verifier::new(
                     "test-jwt-secret",
-                    "supabase",
+                    Some("supabase"),
                     "authenticated",
                 )),
                 resend_body_cap: usize::MAX,

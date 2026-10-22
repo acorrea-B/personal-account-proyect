@@ -8,11 +8,11 @@
 # declara — no los toca.
 
 variable "stage" {
-  description = "Entorno lógico: espacio de nombres separado por entorno."
+  description = "Entorno lógico (solo producción por costos; staging futuro = aditivo)."
   type        = string
   validation {
-    condition     = contains(["staging", "production"], var.stage)
-    error_message = "stage debe ser staging o production."
+    condition     = var.stage == "production"
+    error_message = "stage debe ser production (sin staging por costos — plan D16)."
   }
 }
 

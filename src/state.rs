@@ -55,7 +55,7 @@ impl AppState {
             ),
             signature_verifier: Arc::new(Hs256Verifier::new(
                 &config.supabase_jwt_secret,
-                &config.supabase_jwt_issuer,
+                config.issuer_to_verify(),
                 &config.supabase_jwt_audience,
             )),
         })
@@ -87,7 +87,7 @@ impl AppState {
             ),
             signature_verifier: std::sync::Arc::new(Hs256Verifier::new(
                 "test-jwt-secret",
-                "supabase",
+                Some("supabase"),
                 "authenticated",
             )),
         }

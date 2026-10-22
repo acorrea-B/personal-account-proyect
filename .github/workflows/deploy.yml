@@ -1,14 +1,10 @@
 name: Deploy
 
 on:
-  # Staging: the merge to main deploys when the CI of that commit is green.
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
-  # Production: a tag vX.Y.Z (semver) deploys the tagged commit.
+  # Production deploy: a tag vX.Y.Z (semver) deploys the tagged commit.
   push:
     tags: ["v*"]
+  # Manual redeploy (also production).
   workflow_dispatch:
 
 permissions:
@@ -22,10 +18,10 @@ jobs:
   deploy:
     name: Deploy the api function with Terraform
     runs-on: ubuntu-latest
-    # Protected environments (repository settings): production requires a
-    # manual approval.
+    # The only protected environment of the repository: production — the
+    # tag deploys and the manual redeploy are the same destination (D16).
     environment:
-      name: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
+      name: production
     # Only a green CI deploys (the manual dispatch is always allowed) and the
     # forks never deploy.
     if: >-
@@ -34,13 +30,14 @@ jobs:
        github.event.workflow_run.conclusion == 'success') }}
     env:
       DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-      ENVIRONMENT_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
+      ENVIRONMENT_NAME: production
       # Scaleway credentials. The API provider (scaleway/terraform) talks to
       # the REST API with the secret key alone; the S3 backend that stores the
       # state needs the whole key pair, hence SCALEWAY_ACCESS_KEY.
-      SCW_SECRET_KEY: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      SCW_ACCESS_KEY:  ${{ secrets.SCALEWAY_ACCESS_KEY }}
+      SCW_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
       # Non-secret configuration of the function (plan §12.2) -> terraform
       # vars of the same snake_case name. The secrets of the function are
       # attached out of the pipeline (Scaleway console or Terraform with
@@ -77,8 +74,8 @@ jobs:
         working-directory: infra
         run: terraform init -no-color
 
-      # One workspace per environment: its own state, so staging and
-      # production never share resources.
+      # Single workspace: the only destination is production (D16 — staging
+      # does not exist).
       - name: Select the workspace
         working-directory: infra
         run: terraform workspace select -or-create "$ENVIRONMENT_NAME"
