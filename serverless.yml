@@ -1,0 +1,62 @@
+# Deployment of the `api` function to Scaleway Serverless Functions
+# (plan §12.2 — deploy by tags).
+#
+# The platform compiles the crate from the package patterns declared below, so
+# the zip contains the sources and the lockfile — not a binary.
+#
+# The secrets of the function (DATABASE_URL, SUPABASE_JWT_SECRET,
+# SERVICE_ROLE_KEY, MIGRATIONS_DATABASE_URL) are attached **out of the
+# pipeline** (Scaleway console or Terraform with SOPS) as
+# `secret_environment_variables`: the pipeline only updates the code and the
+# non-secret variables.
+
+# One namespace per environment: `perfil-api-staging` and
+# `perfil-api-production` (the namespace name is the service name).
+service: perfil-api-${opt:stage, 'staging'}
+frameworkVersion: "3"
+configValidationMode: off
+
+plugins:
+  - serverless-scaleway-functions
+
+provider:
+  name: scaleway
+  # The runtime of the platform compiles the crate with Rust 1.96.
+  runtime: rust196
+  scwRegion: ${env:SCW_DEFAULT_REGION, 'fr-par'}
+  # Non-secret configuration of the namespace, inherited by the functions.
+  env:
+    ENV: ${opt:stage, 'staging'}
+    ALLOWED_ORIGINS: ${env:ALLOWED_ORIGINS, ''}
+    MAX_BODY_BYTES: ${env:MAX_BODY_BYTES, '65536'}
+    REQUEST_TIMEOUT_SECS: ${env:REQUEST_TIMEOUT_SECS, '10'}
+    DB_MAX_CONNECTIONS: ${env:DB_MAX_CONNECTIONS, '5'}
+    RATE_LIMIT_LOGIN_PER_MIN: ${env:RATE_LIMIT_LOGIN_PER_MIN, '5'}
+    RATE_LIMIT_RESEND_PER_10MIN: ${env:RATE_LIMIT_RESEND_PER_10MIN, '3'}
+    RATE_LIMIT_CV_WRITE_PER_MIN: ${env:RATE_LIMIT_CV_WRITE_PER_MIN, '10'}
+    RATE_LIMIT_REQUEST_PER_MIN: ${env:RATE_LIMIT_REQUEST_PER_MIN, '120'}
+    CV_MAX_BYTES: ${env:CV_MAX_BYTES, '51200'}
+    CV_VERSIONS_RETENTION: ${env:CV_VERSIONS_RETENTION, '10'}
+
+functions:
+  api:
+    # Name of the exported handler function (see `src/lib.rs`).
+    handler: handle
+    runtime: rust196
+    minScale: 0
+    maxScale: 1
+    memoryLimit: 512
+    timeout: 30s
+    httpOption: enabled
+    sandbox: v2
+    privacy: public
+
+package:
+  # Only the sources and the lockfile travel to the platform: the local
+  # development server (`src/main.rs`) is not deployed.
+  patterns:
+    - "Cargo.toml"
+    - "Cargo.lock"
+    - "src/**"
+    - "migrations/**"
+    - "!src/main.rs"

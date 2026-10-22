@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Bootstrap excluded from the coverage numerator (plan §12.2, D17/ADR 0016):
+  # `main.rs` (development server), `lib.rs` (adapter of the platform),
+  # `config.rs` and `state.rs` (startup) hold no business logic. The list
+  # shrinks as the domain code lands (T004+).
+  COVERAGE_EXCLUDES: '.*src/(main|lib|config|state)\.rs'
+
+jobs:
+  quality:
+    name: Format, lint and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-features
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install the toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Coverage report
+        run: |
+          cargo llvm-cov \
+            --fail-under-lines 90 \
+            --ignore-filename-regex "$COVERAGE_EXCLUDES" \
+            --json \
+            --output-path coverage.json
+
+      - name: Ratchet against the base branch
+        run: |
+          set -euo pipefail
+          BASE=$(git merge-base origin/main HEAD 2>/dev/null || true)
+          if [ -z "$BASE" ] || [ "$BASE" = "$(git rev-parse HEAD)" ]; then
+            echo "The branch has no base commit: the ratchet is skipped."
+            exit 0
+          fi
+          BASE_DIR="$RUNNER_TEMP/base"
+          BASE_REPORT="$RUNNER_TEMP/base-coverage.json"
+          git worktree add "$BASE_DIR" "$BASE"
+          if ! (cd "$BASE_DIR" && cargo llvm-cov \
+            --ignore-filename-regex "$COVERAGE_EXCLUDES" \
+            --json \
+            --output-path "$BASE_REPORT" >/dev/null 2>&1); then
+            echo "The base commit has no measurable coverage: the ratchet is skipped."
+            exit 0
+          fi
+          CURRENT=$(jq -r '(.data[0].totals.lines.percent // .totals.lines.percent // 0)' coverage.json)
+          BASE_PERCENT=$(jq -r '(.data[0].totals.lines.percent // .totals.lines.percent // 0)' "$BASE_REPORT")
+          echo "Coverage: base $BASE_PERCENT% -> branch $CURRENT%"
+          if awk -v current="$CURRENT" -v base="$BASE_PERCENT" 'BEGIN { exit !(current < base) }'; then
+            echo "::error::the coverage of the branch ($CURRENT%) is below the base ($BASE_PERCENT%)"
+            exit 1
+          fi
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Audit the dependencies
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

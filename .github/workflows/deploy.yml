@@ -1,0 +1,99 @@
+name: Deploy
+
+on:
+  # Staging: the merge to main deploys when the CI of that commit is green.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  # Production: a tag vX.Y.Z (semver) deploys the tagged commit.
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy the api function
+    runs-on: ubuntu-latest
+    # Protected environments (repository settings): production requires a
+    # manual approval.
+    environment:
+      name: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
+    # Only a green CI deploys (the manual dispatch is always allowed) and the
+    # forks never deploy.
+    if: >-
+      ${{ github.event.repository.fork == false &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.workflow_run.conclusion == 'success') }}
+    env:
+      ENVIRONMENT_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      # Credentials of Scaleway (environment secrets).
+      SCW_ACCESS_KEY: ${{ secrets.SCALEWAY_ACCESS_KEY }}
+      SCW_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
+      SCW_DEFAULT_PROJECT_ID: ${{ vars.SCALEWAY_PROJECT_ID }}
+      SCW_DEFAULT_REGION: ${{ vars.SCALEWAY_REGION }}
+      # Non-secret configuration of the function (plan §12.2). The secrets of
+      # the function are attached out of the pipeline (Scaleway console or
+      # Terraform with SOPS): they never travel through GitHub.
+      PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+      ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
+      MAX_BODY_BYTES: ${{ vars.MAX_BODY_BYTES }}
+      REQUEST_TIMEOUT_SECS: ${{ vars.REQUEST_TIMEOUT_SECS }}
+      DB_MAX_CONNECTIONS: ${{ vars.DB_MAX_CONNECTIONS }}
+      RATE_LIMIT_LOGIN_PER_MIN: ${{ vars.RATE_LIMIT_LOGIN_PER_MIN }}
+      RATE_LIMIT_RESEND_PER_10MIN: ${{ vars.RATE_LIMIT_RESEND_PER_10MIN }}
+      RATE_LIMIT_CV_WRITE_PER_MIN: ${{ vars.RATE_LIMIT_CV_WRITE_PER_MIN }}
+      RATE_LIMIT_REQUEST_PER_MIN: ${{ vars.RATE_LIMIT_REQUEST_PER_MIN }}
+      CV_MAX_BYTES: ${{ vars.CV_MAX_BYTES }}
+      CV_VERSIONS_RETENTION: ${{ vars.CV_VERSIONS_RETENTION }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install the deployment tooling
+        run: npm install --no-audit --no-fund
+
+      # The migration step (R10) lands with the `migrate` function (T003):
+      # deploy the function, invoke it and update `api` only on a 200.
+      - name: Deploy the function
+        run: npx osls deploy --stage "$ENVIRONMENT_NAME" | tee deploy.log
+
+      - name: Record the deployed version
+        run: |
+          echo "Deployed \`${{ env.DEPLOY_SHA }}\` to $ENVIRONMENT_NAME." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          URL="${PUBLIC_URL:-}"
+          if [ -z "$URL" ]; then
+            URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.scw\.cloud' deploy.log | head -n 1 || true)
+          fi
+          if [ -z "$URL" ]; then
+            echo "::error::the public URL of the function could not be determined"
+            exit 1
+          fi
+          for attempt in $(seq 1 10); do
+            if curl --silent --fail --max-time 10 "$URL/health" | grep --quiet '^ok$'; then
+              echo "The function answers at $URL/health"
+              exit 0
+            fi
+            echo "Attempt $attempt: the function does not answer yet"
+            sleep 5
+          done
+          echo "::error::the smoke test failed at $URL/health"
+          exit 1
