@@ -164,13 +164,15 @@ jobs:
     # Read-only plan against the production workspace (plan §12.2): the PR shows
     # the infrastructure change before the merge can apply it. It is skipped
     # for the forks: they never reach the project credentials.
-    # The credentials must exist as repository secrets (the environment
-    # secrets are not visible to the CI jobs).
+    # The credentials live as environment secrets of `production` (the only
+    # environment of the repository): a job only sees them declaring it.
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false }}
+    environment: production
     env:
-      SCW_SECRET_KEY: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      SCW_ACCESS_KEY:  ${{ secrets.SCALEWAY_ACCESS_KEY }}
+      SCW_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
       ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
       MAX_BODY_BYTES: ${{ vars.MAX_BODY_BYTES }}
       REQUEST_TIMEOUT_SECS: ${{ vars.REQUEST_TIMEOUT_SECS }}

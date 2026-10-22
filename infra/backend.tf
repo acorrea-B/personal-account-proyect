@@ -9,10 +9,12 @@
 
 terraform {
   backend "s3" {
-    bucket   = "perfil-api-terraform-state"
-    key      = "perfil-api/terraform.tfstate"
-    region   = "fr-par"
-    endpoint = "https://s3.fr-par.scw.cloud"
+    bucket = "perfil-api-terraform-state"
+    key    = "perfil-api/terraform.tfstate"
+    region = "fr-par"
+    endpoints = {
+      s3 = "https://s3.fr-par.scw.cloud"
+    }
 
     # Las credenciales llegan por entorno: SCW_ACCESS_KEY -> AWS_ACCESS_KEY_ID
     # y SCW_SECRET_KEY -> AWS_SECRET_ACCESS_KEY (el backend S3 habla el
@@ -22,6 +24,6 @@ terraform {
     skip_region_validation      = true
     skip_metadata_api_check     = true
     skip_s3_checksum            = true
-    force_path_style            = true
+    use_path_style              = true
   }
 }
