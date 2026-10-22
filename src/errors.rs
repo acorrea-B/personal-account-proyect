@@ -140,6 +140,14 @@ pub enum ApiError {
     DependencyUnavailable,
 }
 
+impl ApiError {
+    /// The catalogue slug of this error (R9: the `meta.reason` of any event
+    /// takes it, never another vocabulary).
+    pub fn slug(self) -> &'static str {
+        Catalogue::of(self).slug
+    }
+}
+
 /// The catalogue entry of an error, resolved in one place.
 // Centralization allowed by the rule of structure (§12.1): the whole
 // mapping slug ↔ status ↔ title lives in one match, not in the handlers.
