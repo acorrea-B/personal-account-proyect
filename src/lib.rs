@@ -59,7 +59,7 @@ pub async fn application() -> Result<Application, StartupError> {
             let config = Config::from_env()?;
             init_tracing(&config);
             let state = AppState::build(&config).await?;
-            let router = with_layers(build_router(state), &config);
+            let router = with_layers(build_router(state.clone()), &config, &state);
             Ok(Application { config, router })
         })
         .await
@@ -85,8 +85,30 @@ pub async fn handle(req: Request<Body>) -> Response<Body> {
     }
 }
 
-/// Cross-cutting server layers: tracing, body limit, timeout and CORS.
-fn with_layers(app: Router, config: &Config) -> Router {
+/// The rate limit layer of the instance (FR-021): the configured rates of
+/// R2, the credentials verifier for the user keys and the cap of the read
+/// body already configured.
+fn rate_limit_layer(
+    config: &Config,
+    state: &AppState,
+) -> middleware::ratelimit_layer::RateLimitLayer {
+    use crate::middleware::ratelimit::Rates;
+
+    middleware::ratelimit_layer::RateLimitLayer::new(
+        Rates {
+            login_failed_per_min: config.rate_limit_login_per_min,
+            resend_per_10min: config.rate_limit_resend_per_10min,
+            cv_write_per_min: config.rate_limit_cv_write_per_min,
+            request_per_min: config.rate_limit_request_per_min,
+        },
+        state.signature_verifier.clone(),
+        config.max_body_bytes,
+    )
+}
+
+/// Cross-cutting server layers: tracing, body limit, timeout, CORS and the
+/// rate limit of FR-021.
+fn with_layers(app: Router, config: &Config, state: &AppState) -> Router {
     app.layer(
         TraceLayer::new_for_http().make_span_with(|req: &axum::http::Request<_>| {
             tracing::info_span!(
@@ -96,6 +118,7 @@ fn with_layers(app: Router, config: &Config) -> Router {
             )
         }),
     )
+    .layer(rate_limit_layer(config, state))
     .layer(RequestBodyLimitLayer::new(config.max_body_bytes()))
     .layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,
