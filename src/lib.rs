@@ -8,6 +8,7 @@
 //! The configuration and the connection pool are built once per cold start
 //! and reused by the invocations of that instance.
 
+pub mod clients;
 pub mod config;
 pub mod errors;
 pub mod events;

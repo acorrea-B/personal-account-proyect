@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
+use crate::clients::supabase_auth::SupabaseAuthClient;
 use crate::config::Config;
 use crate::middleware::auth::SignatureVerifier;
 use crate::middleware::hs256::Hs256Verifier;
@@ -16,6 +17,8 @@ use crate::middleware::hs256::Hs256Verifier;
 #[allow(dead_code)]
 pub struct AppState {
     pub pool: PgPool,
+    /// The REST client of Supabase Auth (T008).
+    pub supabase_auth: SupabaseAuthClient,
     pub supabase_url: String,
     pub service_role_key: String,
     pub jwt_secret: String,
@@ -44,6 +47,12 @@ impl AppState {
             jwt_secret: config.supabase_jwt_secret.clone(),
             jwt_issuer: config.supabase_jwt_issuer.clone(),
             jwt_audience: config.supabase_jwt_audience.clone(),
+            supabase_auth: SupabaseAuthClient::new(
+                &config.supabase_url,
+                &config.supabase_publishable_key,
+                &config.service_role_key,
+                config.supabase_timeout,
+            ),
             signature_verifier: Arc::new(Hs256Verifier::new(
                 &config.supabase_jwt_secret,
                 &config.supabase_jwt_issuer,
@@ -70,6 +79,12 @@ impl AppState {
             jwt_secret: "test-jwt-secret".to_string(),
             jwt_issuer: "supabase".to_string(),
             jwt_audience: "authenticated".to_string(),
+            supabase_auth: SupabaseAuthClient::new(
+                "http://127.0.0.1:54321",
+                "test-publishable",
+                "test-service-role-key",
+                std::time::Duration::from_secs(3),
+            ),
             signature_verifier: std::sync::Arc::new(Hs256Verifier::new(
                 "test-jwt-secret",
                 "supabase",
