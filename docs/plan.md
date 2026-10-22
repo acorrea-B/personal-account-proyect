@@ -4,7 +4,7 @@ Versión consolidada tras iteración de decisions — 2026-10-21.
 
 ## 1. Visión General
 
-Sistema de autenticación y gestión de perfil profesional en Rust sobre Scaleway Serverless Functions, orientado a beta abierta.
+Sistema de autenticación y gestión de perfil profesional en Rust sobre Scaleway Serverless Functions (handler `handle`; el runtime Rust de la plataforma compila el crate desde un zip), orientado a beta abierta.
 
 **Alcance Beta (v1):**
 - Registro y login con email + password (Supabase Auth)
@@ -15,7 +15,7 @@ Sistema de autenticación y gestión de perfil profesional en Rust sobre Scalewa
 - Despliegue como una sola función `api`
 
 **Stack:**
-- Backend: Rust (axum + tokio — D8) sobre Scaleway Serverless Functions
+- Backend: Rust (axum + tokio — D8) sobre Scaleway Serverless Functions — el router axum es el núcleo interno y el handler `handle` se lo entrega a cada petición
 - Errores: RFC 7807 `application/problem+json` (D9)
 - Auth: Supabase Auth (JWT, refresh tokens, rotación)
 - DB: Supabase PostgreSQL
@@ -31,7 +31,7 @@ Sistema de autenticación y gestión de perfil profesional en Rust sobre Scalewa
 | D3 | Acceso a datos | **Service key + validación en Rust** | RLS desactivada (o deny-all por defecto); cada query filtra por `user_id` del JWT validado |
 | D4 | Normalización de email | **Solo en tabla espejo** | Supabase Auth ya normaliza y garantiza unicidad en `auth.users`; punycode diferido a social login |
 | D5 | Respuesta de CV | **201 Created** | Flujo síncrono, no hay cola de procesamiento |
-| D6 | Granularidad | **1 función monolítica `api`** | Router interno; un deployment, un cold start, código compartido |
+| D6 | Granularidad | **1 función monolítica `api`** | Router interno (axum) invocado por el handler `handle`; un deployment, un cold start, código compartido |
 | D7 | Storage CV | **Columna TEXT en PostgreSQL** | Tabla `cv_texts`, límite 50KB; Storage queda como camino aditivo para PDFs en v2 |
 | D8 | Framework Rust | **axum + tokio** | Middleware tower composable (gate JWT compartido, DRY); detalle en ADR 0008 |
 | D9 | Formato de errores | **RFC 7807** | `application/problem+json`; detalle en §13.3 y ADR 0009 |
@@ -245,28 +245,30 @@ create index cv_versions_user_recent on cv_versions (user_id, archived_at desc);
 | Etapa | Disparador | Qué hace |
 |-------|-----------|----------|
 | **CI (gates)** | PR hacia `main` | `cargo fmt --check` · `cargo clippy -D warnings` · `cargo test` (unitarias + integración) con **cobertura mínima 90%** (D17) · `cargo audit` — todo obligatorio para merge |
-| **Deploy staging** | merge a `main` | build release (imagen contenedor) → deploy a la función staging → smoke test básico (health + un flujo auth) |
-| **Deploy producción** | push de tag `vX.Y.Z` (semver, anotado) | deploy a la función producción → smoke test → release notes del tag como changelog |
-| **Rollback** | manual | re-desplegar el tag anterior (los deployments de función son inmutables por tag; reversion = re-crear deployment del tag previo) |
+| **Deploy staging** | merge a `main` | build release + zip de la función (el runtime Rust de Scaleway compila el crate) → deploy de la función `migrate` → invocarla (migraciones) → deploy de la función `api` → smoke test básico (health + un flujo auth) |
+| **Deploy producción** | push de tag `vX.Y.Z` (semver, anotado) | build release + zip → deploy de la función `migrate` → invocarla (migraciones) → deploy de la función `api` → smoke test → release notes del tag como changelog |
+| **Rollback** | manual | re-desplegar el tag anterior (los deployments de función son inmutables por tag; reversion = re-desplegar la versión previa). Ojo: si el tag anterior migró el esquema, el rollback de código no deshace la migración — las migraciones deben ser retrocompatibles |
 
 **Reglas del pipeline:**
 - Los workflows de deploy se ejecutan con credenciales Scaleway (`SCW_ACCESS_KEY`/`SCW_SECRET_KEY`) guardadas en **GitHub Environment secrets** (`staging` y `production` como environments protegidos; producción requiere aprobación manual del environment)
-- **Los secrets de la función NUNCA ni pasan por GitHub ni por el repo:** el deployment de la función los referencia desde Scaleway Secret Manager — el pipeline solo inyecta nombres/referencias
-- El build usa tags de imagen trazables (`api:{git-sha}`, `api:{v-tag}`); producción y staging nunca comparten imagen en vuelo sin que el tag lo documente
+- **Los secrets de la función NUNCA ni pasan por GitHub ni por el repo:** se adjuntan **fuera del pipeline** (consola de Scaleway o Terraform con SOPS) como `secret_environment_variables` cifradas por la plataforma; el pipeline solo actualiza el código y las variables no secretas. Scaleway no expone referencias a Secret Manager en Functions (solo en Jobs), de ahí que la adjunción sea manual. El pipeline nunca rota secrets: la rotación es una operación en Scaleway + Supabase seguida de un re-deploy de la misma versión
+- Las versiones de la función son trazables (`api:{git-sha}` en staging, `api:{v-tag}` en producción); el pipeline registra el commit y el tag desplegados, y producción y staging nunca comparten versión en vuelo sin que el tag lo documente
+- **Migraciones (R10):** paso previo obligatorio en ambos entornos — el pipeline despliega la función `migrate` (mismo crate, handler propio), la invoca y **solo si responde 200** actualiza la función `api`. Si la migración falla, la API sigue con la versión anterior. Las migraciones se ejecutan contra la **conexión directa** de Supabase (`MIGRATIONS_DATABASE_URL`), nunca contra el pooler: `sqlx` usa un advisory lock de sesión que el pooler en modo transacción no soporta
 - Deploy deshabilitado por defecto en forks y en PRs externos
 - **Cobertura (D17):** el gate corre cobertura de líneas sobre unitarias + integración con umbral **≥90%** global (herramienta: `cargo-llvm-cov`, decisión fina del plan de implementación); cobertura con ratchet — si `main` sube, no puede bajar. Código generado por macros externas y el bootstrap (`main.rs`/config) se excluyen del numerador con justificación en el PR
 
-**Secrets que la función requiere para funcionar (en Scaleway Secret Manager, por entorno):**
+**Secrets que la función requiere para funcionar (cifrados en Scaleway, por entorno):**
 
 | Secret | Uso |
 |--------|-----|
 | `SERVICE_ROLE_KEY` | clave `service_role` de Supabase (acceso DB por D3) |
 | `SUPABASE_JWT_SECRET` | verificación de firma de los JWT de Supabase Auth (o su JWKS URL si se elige rotación) |
 | `SUPABASE_URL` | endpoint de Supabase (Auth admin, health) |
-| `DATABASE_URL` | cadena de conexión al pooler de Supabase PostgreSQL |
+| `DATABASE_URL` | cadena de conexión al pooler de Supabase PostgreSQL (la API) |
+| `MIGRATIONS_DATABASE_URL` | cadena de conexión **directa** a Supabase PostgreSQL (solo el handler `migrate`; el pooler no soporta el advisory lock de `sqlx`) |
 | `SUPABASE_WEBHOOK_SECRET` | (opcional) verificación de callbacks/webhooks de Supabase si se usan |
 
-Variables no secretas (config del deployment): `ENV`, `PORT`, límites de rate limiting, tamaño de pool, URL de dominio para CORS.
+Variables no secretas (config del deployment): `ENV`, límites de rate limiting, tamaño de pool, orígenes CORS. `PORT` solo aplica al servidor de desarrollo local (`cargo run`), no a la función.
 
 **Rotación:** la `service_role` key y el JWT secret tienen política de rotación periódica (revisar cada 90 días); la rotación ocurre en Scaleway Secret Manager + Supabase, sin re-deploy (la función los lee en arranque o en refresco).
 
@@ -293,7 +295,8 @@ Variables no secretas (config del deployment): `ENV`, `PORT`, límites de rate l
 ### 13.2 Estructura del crate (≤2 structs por archivo)
 ```
 src/
-  main.rs                  — bootstrap: config, pool, router, servidor
+  lib.rs                   — handler de la función `handle` (axum) + `migrate`; entrega cada petición al router
+  main.rs                  — servidor de desarrollo local (mismo router); no se despliega
   config.rs                — Config (env)
   state.rs                 — AppState (pool + clientes)
   router.rs                — mapeo de rutas + lista explícita de públicas
