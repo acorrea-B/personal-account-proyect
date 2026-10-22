@@ -1,6 +1,8 @@
 <!--
 ## Sync Impact Report
-- Version change: 1.1.0 → 1.2.0 (MINOR: gate de CI con cobertura mínima 90% + ratchet, D17/ADR 0016)
+- Version change: 1.2.0 → 1.3.0 (MINOR: objetivo de despliegue = Serverless Functions
+  con handler Rust; secrets adjuntos fuera del pipeline; paso de migraciones previo
+  al deploy, D16/R10)
 - Modified: sección "Flujo de Trabajo" (CI/CD)
 - Principles derived from: docs/plan.md §10 (Principios de Diseño), §11 (OWASP),
   §12 (Procesos), y decisiones D1-D15 (docs/adr/0001-0014)
@@ -76,8 +78,11 @@ feedback incorporado rama a rama.
   (exclusiones solo con justificación en el PR), y `cargo audit` — todos obligatorios
   para merge. Merge a main despliega a staging;
   **producción SOLO por tag `vX.Y.Z`** con environment protegido y aprobación manual.
-  Los secretos de la función viven exclusivamente en Scaleway Secret Manager — nunca
-  pasan por GitHub ni por el repo; el pipeline solo los referencia por nombre.
+  Los secretos de la función se **adjuntan fuera del pipeline** (secret environment
+  variables cifradas por Scaleway) — nunca pasan por GitHub ni por el repo; el
+  pipeline solo actualiza el código y las variables no secretas. El paso de
+  migraciones lo ejecuta la propia función `migrate`, que ya tiene sus secrets, y
+  es condición previa para actualizar la función de la API.
 - **Testing (plan §12.3):** unitarias (dominio/validación), integración (flujos auth
   completos contra Supabase local), matriz de seguridad obligatoria por endpoint
   (401/403/BOLA), todo edge case de plan §5 con al menos un test.
@@ -100,4 +105,4 @@ feedback incorporado rama a rama.
 - La granularidad de revisión (Principle VII) y el flujo de pausa aplican también a la
   generación de código por agentes: pausar para feedback del proyecto en cada rama.
 
-**Version**: 1.2.0 | **Ratified**: 2026-10-21 | **Last Amended**: 2026-10-21
+**Version**: 1.3.0 | **Ratified**: 2026-10-21 | **Last Amended**: 2026-10-22
