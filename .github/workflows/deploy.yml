@@ -1,14 +1,10 @@
 name: Deploy
 
 on:
-  # Staging: the merge to main deploys when the CI of that commit is green.
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
-  # Production: a tag vX.Y.Z (semver) deploys the tagged commit.
+  # Production deploy: a tag vX.Y.Z (semver) deploys the tagged commit.
   push:
     tags: ["v*"]
+  # Manual redeploy (also production).
   workflow_dispatch:
 
 permissions:
@@ -34,7 +30,7 @@ jobs:
        github.event.workflow_run.conclusion == 'success') }}
     env:
       DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-      ENVIRONMENT_NAME: ${{ startsWith(github.ref, 'refs/tags/v') && 'production' || 'staging' }}
+      ENVIRONMENT_NAME: production
       # Scaleway credentials. The API provider (scaleway/terraform) talks to
       # the REST API with the secret key alone; the S3 backend that stores the
       # state needs the whole key pair, hence SCALEWAY_ACCESS_KEY.

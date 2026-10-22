@@ -161,7 +161,7 @@ jobs:
   terraform_plan:
     name: Terraform plan
     runs-on: ubuntu-latest
-    # Read-only plan against the staging workspace (plan §12.2): the PR shows
+    # Read-only plan against the production workspace (plan §12.2): the PR shows
     # the infrastructure change before the merge can apply it. It is skipped
     # for the forks: they never reach the project credentials.
     # The credentials must exist as repository secrets (the environment
@@ -203,7 +203,7 @@ jobs:
         working-directory: infra
         run: |
           set -euo pipefail
-          terraform workspace select -or-create staging
+          terraform workspace select -or-create production
           VARS_ARGS=()
           for name in ALLOWED_ORIGINS MAX_BODY_BYTES REQUEST_TIMEOUT_SECS \
             DB_MAX_CONNECTIONS RATE_LIMIT_LOGIN_PER_MIN \
@@ -213,7 +213,7 @@ jobs:
           done
           set +e
           terraform plan -input=false -no-color -detailed-exitcode \
-            -var "stage=staging" "${VARS_ARGS[@]}" | tee plan.txt
+            -var "stage=production" "${VARS_ARGS[@]}" | tee plan.txt
           RC=${PIPESTATUS[0]}
           set -e
           if [ "$RC" = "1" ] || [ "$RC" -gt 2 ]; then

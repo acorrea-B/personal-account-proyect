@@ -41,7 +41,7 @@ Sistema de autenticación y gestión de perfil profesional en Rust sobre Scalewa
 | D13 | Historial CV | **Tabla `cv_versions`**, retención últimas 10 | Purga transaccional junto al upsert — ADR 0013 |
 | D14 | Campos del perfil | **Texto + `links`/`skills` como jsonb** | Validación estructural en Rust; tablas auxiliares diferidas a v2 |
 | D15 | Preparación era LLM | **Reservar `cv_versions.origin` + `profiles.processing_consent`** | Columnas sin lógica: capturan procedencia y consentimiento desde el primer dato; quotas/jobs/pgvector diferidos — ADR 0014 |
-| D16 | CI/CD producción | **Deploy por tags `vX.Y.Z` en GitHub Actions** | Staging auto por merge; producción solo por tag con environment protegido; secrets solo en Scaleway Secret Manager (nunca por GitHub) — ADR 0015 |
+| D16 | CI/CD producción | **Deploy por tags `vX.Y.Z` en GitHub Actions** | Sin staging (por costos): producción solo por tag con environment protegido y aprobación manual; secrets solo en Scaleway Secret Manager (nunca por GitHub) — ADR 0015 |
 | D17 | Gate de calidad | **Tests unitarios + integración, cobertura ≥90%** | Requisito de merge a main; cobertura con ratchet; exclusiones justificadas — ADR 0016 |
 | D18 | Trazabilidad | **Estándar de eventos: taxonomía cerrada + envelope común, log-only en beta** | Taxonomía `auth.*`/`profile.*`/`cv.*`/`security.*`, reasons = slugs del catálogo de errores; tabla `audit_events` diferida (aditiva) — ADR 0017 |
 
@@ -227,35 +227,34 @@ create index cv_versions_user_recent on cv_versions (user_id, archived_at desc);
 | API6:2023 — Sensitive Business Flows | Abuso de flujos de negocio | `resend-verification` con límites estrictos anti email-bombing; monitoreo de registro; captcha solo si se detecta automatización (futuro) |
 | API7:2023 — SSRF | Requests falsificados a servicios internos | Regla dura: la API nunca hace fetch a URLs provistas por usuarios. Se re-evalúa con `cv:process` en v2 |
 | API8:2023 — Security Misconfiguration | Configuración insegura | CORS restringido a dominios conocidos; secrets en Scaleway Secret Manager; headers de seguridad; sin stack traces al cliente |
-| API9:2023 — Improper Inventory Management | Endpoints viejos expuestos | Versionado `/v1` desde el día 1; docs OpenAPI generadas; entorno staging separado de producción |
+| API9:2023 — Improper Inventory Management | Endpoints viejos expuestos | Versionado `/v1` desde el día 1; docs OpenAPI generadas; sin entorno staging (por costos — D16) |
 | API10:2023 — Unsafe Consumption of APIs | Consumo inseguro de APIs externas | Único externo: Supabase — respuestas validadas, timeouts y retries acotados con backoff |
 
 ## 12. Procesos
 
 ### 12.1 Git y contribución (trunk-based — D10)
-- `main` siempre deployable; despliega vía CI cuando está verde
+- `main` siempre deployable; el despliegue a producción ocurre SOLO con la generación de un tag `vX.Y.Z` (CI verde; sin staging por costos — D16)
 - Trabajo en ramas cortas `feature/*`; PR hacia `main` con squash-merge; Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`)
 - **Regla de granularidad:** máx **6 archivos** por rama/PR. Si una feature excede, se sub-divide en ramas apiladas (ej: CRUD de 9 archivos → "CR" 5 archivos → PR → revisión manual + feedback → merge → "UD" 4 archivos → PR). **Pausa obligatoria en cada rama** para revisión iterativa
 - **Regla de estructura:** máx **2 structs/clases por archivo**, salvo centralizaciones de utils o enums
 
 ### 12.2 CI/CD (GitHub Actions) — despliegue por tags (D16)
 
-**Entornos:** staging y producción como namespaces/funciones separadas en Scaleway, cada uno con su propio set de secrets (nombres idénticos, valores distintos).
+**Entorno:** solo **producción** — el despliegue ocurre únicamente con la generación de un tag de versión `vX.Y.Z` (sin staging: costo no contemplado). Namespace `perfil-api-production` con su set de secrets. Si en un futuro entra staging, es aditivo con Terraform (`-var stage=staging` + workspace `staging`).
 
 | Etapa | Disparador | Qué hace |
 |-------|-----------|----------|
 | **CI (gates)** | PR hacia `main` | `cargo fmt --check` · `cargo clippy -D warnings` · `cargo test` (unitarias + integración) con **cobertura mínima 90%** (D17) · `cargo audit` — todo obligatorio para merge |
-| **Deploy staging** | merge a `main` | zip de las fuentes del crate (el runtime Rust de Scaleway compila) → `terraform apply` del entorno staging con `-target` ordenado: función `migrate` → invocarla (migraciones) → función `api` → smoke test básico (health + un flujo auth) |
 | **Deploy producción** | push de tag `vX.Y.Z` (semver, anotado) | zip de las fuentes del crate → `terraform apply` del entorno producción con `-target` ordenado: `migrate` → invocarla → `api` → smoke test → release notes del tag como changelog |
 | **Rollback** | manual | re-desplegar el tag anterior (los deployments de función son inmutables por tag; reversion = re-desplegar la versión previa). Ojo: si el tag anterior migró el esquema, el rollback de código no deshace la migración — las migraciones deben ser retrocompatibles |
 
 **Reglas del pipeline:**
 - **El deploy se orquesta con Terraform** (`infra/`, provider `scaleway`): los recursos (`scaleway_function_namespace`, `scaleway_function`) son declarativos, no se usa el Serverless Framework (el tooling `osls`/`serverless.yml` queda eliminado del repo — Terraform es la única fuente de verdad). La plataforma sigue compilando el crate: el pipeline empaqueta el zip de las fuentes (`Cargo.toml`, `Cargo.lock`, `src/**`, `migrations/**`, excluye `src/main.rs`) y Terraform lo despliega
-- **Estado de Terraform:** backend remoto en **Scaleway Object Storage** (clase one-zona, el state es de pocos KB), con lock nativo del backend si la API S3 de Scaleway soporta conditional writes (Terraform ≥1.10); a falta de ello, la `concurrency` de GitHub Actions serializa los `apply` por entorno. Los PRs ejecutan `terraform plan` (read-only, salida en el PR); el `apply` solo corre desde `main` (staging) o de un tag (producción, environment protegido)
-- Los workflows de deploy se ejecutan con credenciales Scaleway (`SCW_ACCESS_KEY`/`SCW_SECRET_KEY`) guardadas en **GitHub Environment secrets** (`staging` y `production` como environments protegidos; producción requiere aprobación manual del environment)
+- **Estado de Terraform:** backend remoto en **Scaleway Object Storage** (clase one-zona, el state es de pocos KB), con lock nativo del backend si la API S3 de Scaleway soporta conditional writes (Terraform ≥1.10); a falta de ello, la `concurrency` de GitHub Actions serializa los `apply` por entorno. Los PRs ejecutan `terraform plan` (read-only, salida en el PR); el `apply` solo corre por un tag (producción; environment protegido con aprobación manual)
+- Los workflows de deploy se ejecutan con credenciales Scaleway (`SCW_ACCESS_KEY`/`SCW_SECRET_KEY`) guardadas en **GitHub Environment secrets** (`production` como environment protegido con aprobación manual)
 - **Los secrets de la función NUNCA ni pasan por GitHub ni por el repo:** se adjuntan **fuera del pipeline** (consola de Scaleway o Terraform con SOPS) como `secret_environment_variables` cifradas por la plataforma; el pipeline solo actualiza el código y las variables no secretas. Scaleway no expone referencias a Secret Manager en Functions (solo en Jobs), de ahí que la adjunción sea manual. El pipeline nunca rota secrets: la rotación es una operación en Scaleway + Supabase seguida de un re-deploy de la misma versión
-- Las versiones de la función son trazables (`api:{git-sha}` en staging, `api:{v-tag}` en producción); el pipeline registra el commit y el tag desplegados, y producción y staging nunca comparten versión en vuelo sin que el tag lo documente
-- **Migraciones (R10):** paso previo obligatorio en ambos entornos — el pipeline despliega la función `migrate` (mismo crate, handler propio), la invoca y **solo si responde 200** actualiza la función `api`. Si la migración falla, la API sigue con la versión anterior. Las migraciones se ejecutan contra la **conexión directa** de Supabase (`MIGRATIONS_DATABASE_URL`), nunca contra el pooler: `sqlx` usa un advisory lock de sesión que el pooler en modo transacción no soporta
+- Las versiones de la función son trazables (`api:{v-tag}`); el pipeline registra el commit y el tag desplegados — la función en vuelo siempre corresponde al tag documentado
+- **Migraciones (R10):** paso previo obligatorio — el pipeline despliega la función `migrate` (mismo crate, handler propio), la invoca y **solo si responde 200** actualiza la función `api`. Si la migración falla, la API sigue con la versión anterior. Las migraciones se ejecutan contra la **conexión directa** de Supabase (`MIGRATIONS_DATABASE_URL`), nunca contra el pooler: `sqlx` usa un advisory lock de sesión que el pooler en modo transacción no soporta
 - Deploy deshabilitado por defecto en forks y en PRs externos
 - **Cobertura (D17):** el gate corre cobertura de líneas sobre unitarias + integración con umbral **≥90%** global (herramienta: `cargo-llvm-cov`, decisión fina del plan de implementación); cobertura con ratchet — si `main` sube, no puede bajar. Código generado por macros externas y el bootstrap (`main.rs`/config) se excluyen del numerador con justificación en el PR
 
