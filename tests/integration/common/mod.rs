@@ -9,10 +9,7 @@
 //! `.env.test` (the values of the local stack, gitignored — they are set
 //! before the first `app()` of the test binary).
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-use axum::body::{Body, to_bytes};
+use axum::body::{to_bytes, Body};
 use axum::http::Request;
 use tower::ServiceExt;
 
@@ -22,7 +19,9 @@ use tower::ServiceExt;
 fn load_env_files() {
     // Later files win over the earlier ones (the test stack has priority).
     for file in [".env", ".env.test"] {
-        let Ok(content) = std::fs::read_to_string(file) else { continue };
+        let Ok(content) = std::fs::read_to_string(file) else {
+            continue;
+        };
         for line in content.lines() {
             if line.trim().is_empty() || line.trim_start().starts_with('#') {
                 continue;
@@ -40,10 +39,18 @@ fn load_env_files() {
 /// else (the real project is in the env!) does not touch the tests.
 fn local_env_ok() -> bool {
     let db_ok = std::env::var("DATABASE_URL")
-        .map(|url| ["localhost", "127.0.0.1"].iter().any(|host| url.contains(host)))
+        .map(|url| {
+            ["localhost", "127.0.0.1"]
+                .iter()
+                .any(|host| url.contains(host))
+        })
         .unwrap_or(false);
     let auth_ok = std::env::var("SUPABASE_URL")
-        .map(|url| ["localhost", "127.0.0.1"].iter().any(|host| url.contains(host)))
+        .map(|url| {
+            ["localhost", "127.0.0.1"]
+                .iter()
+                .any(|host| url.contains(host))
+        })
         .unwrap_or(false);
     let credentials_ok = std::env::var("SERVICE_ROLE_KEY")
         .map(|key| !key.trim().is_empty())
@@ -95,12 +102,15 @@ pub async fn call(
 
 /// The body of the answer as JSON (the problem documents carry one).
 pub async fn json_of(response: axum::response::Response) -> serde_json::Value {
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("complete");
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("complete");
     serde_json::from_slice(&body).expect("the integration answers are always valid JSON")
 }
 
 /// Fixture via the admin API (R8): one account verificado/no verificado —
-/// returns the id of the user.
+/// returns the id of the user. Unconsumed until its flow lands (T011+).
+#[expect(dead_code)]
 pub async fn admin_create_user(verified: bool) -> String {
     let base = std::env::var("SUPABASE_URL").expect("the guard checked it");
     let service = std::env::var("SERVICE_ROLE_KEY").expect("the guard checked it");
@@ -138,7 +148,9 @@ pub async fn admin_create_user(verified: bool) -> String {
 }
 
 /// The login of a fixture email+password (the harness proves flows end to
-/// end); it answers the pair or the error code of Supabase.
+/// end); it answers the pair or the error code of Supabase. Unconsumed
+/// until its flow lands (T011+).
+#[expect(dead_code)]
 pub async fn login(email: &str, password: &str) -> serde_json::Value {
     let base = std::env::var("SUPABASE_URL").expect("the guard checked it");
     let service = std::env::var("SERVICE_ROLE_KEY").expect("the guard checked it");
@@ -160,4 +172,3 @@ pub async fn login(email: &str, password: &str) -> serde_json::Value {
         .expect("the auth API answers");
     response.json().await.expect("the auth JSON")
 }
-

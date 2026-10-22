@@ -73,6 +73,32 @@ fn map_error(error: ErrorKind) -> ApiError {
 }
 
 #[cfg(test)]
+impl Hs256Verifier {
+    /// Issues a test credential: `expired` builds one with `exp` in the
+    /// past to exercise the mapping of the expiry.
+    pub fn test_token(app: &crate::state::AppState, user_id: &str, expired: bool) -> String {
+        use jsonwebtoken::{encode, EncodingKey, Header};
+
+        let exp = if expired {
+            1_000_000
+        } else {
+            4_102_344_000_000_u64
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &serde_json::json!({
+                "sub": user_id,
+                "iss": app.jwt_issuer,
+                "aud": app.jwt_audience,
+                "exp": exp
+            }),
+            &EncodingKey::from_secret(app.jwt_secret.as_bytes()),
+        )
+        .expect("the test token is valid")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use jsonwebtoken::{encode, EncodingKey, Header};
@@ -111,31 +137,5 @@ mod tests {
             verifier.verify(&token("test-secret", Some("other-tenant"))),
             Err(ApiError::Unauthorized { .. })
         ));
-    }
-}
-
-#[cfg(test)]
-impl Hs256Verifier {
-    /// Issues a test credential: `expired` builds one with `exp` in the
-    /// past to exercise the mapping of the expiry.
-    pub fn test_token(app: &crate::state::AppState, user_id: &str, expired: bool) -> String {
-        use jsonwebtoken::{encode, EncodingKey, Header};
-
-        let exp = if expired {
-            1_000_000
-        } else {
-            4_102_344_000_000_u64
-        };
-        encode(
-            &Header::new(Algorithm::HS256),
-            &serde_json::json!({
-                "sub": user_id,
-                "iss": app.jwt_issuer,
-                "aud": app.jwt_audience,
-                "exp": exp
-            }),
-            &EncodingKey::from_secret(app.jwt_secret.as_bytes()),
-        )
-        .expect("the test token is valid")
     }
 }
