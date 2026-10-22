@@ -119,7 +119,11 @@ impl Config {
     /// does not emit it (legacy gotrue; the verification skips it).
     pub fn issuer_to_verify(&self) -> Option<&str> {
         let issuer = self.supabase_jwt_issuer.trim();
-        if issuer.is_empty() { None } else { Some(issuer) }
+        if issuer.is_empty() {
+            None
+        } else {
+            Some(issuer)
+        }
     }
 }
 

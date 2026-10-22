@@ -11,7 +11,9 @@ use axum::http::StatusCode;
 /// document (the stub) — the credential is not required.
 #[tokio::test]
 async fn the_public_routes_answer_503_from_the_stub() {
-    let Some(app) = app().await else { return; };
+    let Some(app) = app().await else {
+        return;
+    };
 
     for (method, path) in [
         ("POST", "/v1/auth/register"),
@@ -27,8 +29,7 @@ async fn the_public_routes_answer_503_from_the_stub() {
         );
         let document = json_of(response).await;
         assert_eq!(
-            document["type"],
-            "https://api.example.com/errors/dependency-unavailable",
+            document["type"], "https://api.example.com/errors/dependency-unavailable",
             "{method} {path} must answer the canonical stub"
         );
     }
@@ -42,7 +43,9 @@ async fn the_public_routes_answer_503_from_the_stub() {
 /// credential — the gate answers before the stub.
 #[tokio::test]
 async fn the_protected_routes_require_a_credential() {
-    let Some(app) = app().await else { return; };
+    let Some(app) = app().await else {
+        return;
+    };
 
     for (method, path) in [
         ("POST", "/v1/auth/revoke"),
@@ -51,7 +54,10 @@ async fn the_protected_routes_require_a_credential() {
         ("POST", "/v1/cv/text"),
         ("GET", "/v1/cv/text"),
         ("GET", "/v1/cv/versions"),
-        ("GET", "/v1/cv/versions/019c0eb3-4c8e-7dd2-b358-e1a5c66d1f4d"),
+        (
+            "GET",
+            "/v1/cv/versions/019c0eb3-4c8e-7dd2-b358-e1a5c66d1f4d",
+        ),
     ] {
         let response = call(&app, method, path, None).await;
         assert_eq!(
@@ -60,7 +66,10 @@ async fn the_protected_routes_require_a_credential() {
             "{method} {path} must be protected (deny-by-default)"
         );
         let document = json_of(response).await;
-        assert_eq!(document["type"], "https://api.example.com/errors/unauthorized");
+        assert_eq!(
+            document["type"],
+            "https://api.example.com/errors/unauthorized"
+        );
         assert_eq!(document["instance"], path);
     }
 }
