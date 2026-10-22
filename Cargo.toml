@@ -10,7 +10,10 @@ axum = { version = "0.8", features = ["macros", "http2"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "timeout", "limit"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "uuid", "json", "migrate"] }
+# Sin defaults: el feature `any` arrastra mysql (y con él `rsa`, RUSTSEC-2023-0071
+# Marvin Attack, sin parche) que la API no usa — solo Postgres. `macros` es
+# requerido por los derives sqlx::FromRow de los repositories.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "chrono", "uuid", "json", "migrate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 validator = { version = "0.21", features = ["derive"] }
