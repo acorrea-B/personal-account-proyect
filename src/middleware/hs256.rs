@@ -71,6 +71,49 @@ fn map_error(error: ErrorKind) -> ApiError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+
+    /// Issues a credential for the tests of this module: `with_iss` adds the
+    /// claim of the issuer (absent in the legacy gotrue tokens).
+    fn token(secret: &str, iss: Option<&str>) -> String {
+        let claims = serde_json::json!({
+            "sub": "c0a8e1f2-33b4-4c5d-8e9f-a0b1c2d3e4f5",
+            "aud": "authenticated",
+            "exp": 4_102_344_000_000_u64,
+            "iss": iss,
+        });
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("the test token is valid")
+    }
+
+    /// The issuer absent (legacy gotrue — T006 amend) skips its check: the
+    /// credential without `iss` is valid for the verifier without issuer.
+    #[test]
+    fn the_verifier_without_issuer_accepts_a_token_without_iss() {
+        let verifier = Hs256Verifier::new("test-secret", None, "authenticated");
+        assert!(verifier.verify(&token("test-secret", None)).is_ok());
+    }
+
+    /// The issuer declared must coincide: the mismatch is never a leakage
+    /// of the internal cause — plain unauthorized (§13.4).
+    #[test]
+    fn the_verifier_rejects_a_token_of_another_issuer() {
+        let verifier = Hs256Verifier::new("test-secret", Some("supabase"), "authenticated");
+        assert!(matches!(
+            verifier.verify(&token("test-secret", Some("other-tenant"))),
+            Err(ApiError::Unauthorized { .. })
+        ));
+    }
+}
+
 #[cfg(test)]
 impl Hs256Verifier {
     /// Issues a test credential: `expired` builds one with `exp` in the

@@ -9,8 +9,8 @@
 //! stub.
 
 use axum::{
-    Router,
     routing::{get, post, put},
+    Router,
 };
 
 use crate::errors::{ApiError, Problem};
@@ -78,8 +78,8 @@ mod tests {
     use crate::middleware::hs256::Hs256Verifier;
     use crate::state::AppState;
 
-    use axum::body::{Body, to_bytes};
-    use axum::http::{Request, StatusCode, header};
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header, Request, StatusCode};
     use tower::ServiceExt;
 
     /// The protected route without a credential is denied by default
@@ -106,9 +106,14 @@ mod tests {
             Some("application/problem+json")
         );
 
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("complete");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("complete");
         let document: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
-        assert_eq!(document["type"], "https://api.example.com/errors/unauthorized");
+        assert_eq!(
+            document["type"],
+            "https://api.example.com/errors/unauthorized"
+        );
         assert_eq!(document["instance"], "/v1/profile");
     }
 
@@ -132,7 +137,39 @@ mod tests {
             .expect("the router never fails");
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("complete");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("complete");
+        let document: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
+        assert_eq!(
+            document["type"],
+            "https://api.example.com/errors/dependency-unavailable"
+        );
+    }
+
+    /// The version route (with `id` in the path) with a valid credential
+    /// reaches its own stub: the parameter wiring answered 503 too.
+    #[tokio::test]
+    async fn the_version_route_with_a_valid_credential_reaches_the_stub() {
+        let state = AppState::for_tests();
+        let router = build_router(state.clone());
+        let token =
+            Hs256Verifier::test_token(&state, "c0a8e1f2-33b4-4c5d-8e9f-a0b1c2d3e4f5", false);
+
+        let response = router
+            .oneshot(
+                Request::get("/v1/cv/versions/019c0eb3-4c8e-7dd2-b358-e1a5c66d1f4d")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("the request is valid"),
+            )
+            .await
+            .expect("the router never fails");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("complete");
         let document: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         assert_eq!(
             document["type"],
@@ -185,8 +222,13 @@ mod tests {
             .expect("the router never fails");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("complete");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("complete");
         let document: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
-        assert_eq!(document["type"], "https://api.example.com/errors/token-expired");
+        assert_eq!(
+            document["type"],
+            "https://api.example.com/errors/token-expired"
+        );
     }
 }
