@@ -41,6 +41,18 @@ jobs:
       - name: Start Supabase
         run: supabase init && supabase start
 
+      - name: Export the local credentials for the integration tests
+        run: |
+          STATUS=$(supabase status -o env)
+          for pair in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SUPABASE_JWT_SECRET; do
+            echo "$STATUS" | grep "^$pair=" | head -n 1 >> "$GITHUB_ENV"
+          done
+          # The publishable of the new key system occupies the anon slot.
+          KEY=$(echo "$STATUS" | grep '^SUPABASE_ANON_KEY=' | head -n 1 | cut -d= -f2-)
+          echo "SUPABASE_PUBLISHABLE_KEY=$KEY" >> "$GITHUB_ENV"
+          # The legacy gotrue of Supabase local does not emit issuer.
+          echo "SUPABASE_JWT_ISSUER=" >> "$GITHUB_ENV"
+
       - name: Install the toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -77,6 +89,18 @@ jobs:
 
       - name: Start Supabase
         run: supabase init && supabase start
+
+      - name: Export the local credentials for the integration tests
+        run: |
+          STATUS=$(supabase status -o env)
+          for pair in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SUPABASE_JWT_SECRET; do
+            echo "$STATUS" | grep "^$pair=" | head -n 1 >> "$GITHUB_ENV"
+          done
+          # The publishable of the new key system occupies the anon slot.
+          KEY=$(echo "$STATUS" | grep '^SUPABASE_ANON_KEY=' | head -n 1 | cut -d= -f2-)
+          echo "SUPABASE_PUBLISHABLE_KEY=$KEY" >> "$GITHUB_ENV"
+          # The legacy gotrue of Supabase local does not emit issuer.
+          echo "SUPABASE_JWT_ISSUER=" >> "$GITHUB_ENV"
 
       - name: Install the toolchain
         uses: dtolnay/rust-toolchain@stable
