@@ -9,13 +9,14 @@
 //! and reused by the invocations of that instance.
 
 pub mod config;
+pub mod errors;
 pub mod router;
 pub mod state;
 
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::Router;
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
@@ -155,27 +156,11 @@ fn init_tracing(config: &Config) {
     }
 }
 
-/// Minimal RFC 7807 answer for the failures that happen outside the request
-/// lifecycle (the function could not start).
-///
-/// The canonical catalogue (`src/errors.rs`) takes over this body; until then
-/// the answer must still be a `application/problem+json` document.
+/// RFC 7807 answer for the failures that happen outside the request
+/// lifecycle (the function could not start): the canonical catalogue of
+/// `src/errors.rs` builds the body.
 fn internal_error() -> Response<Body> {
-    let body = serde_json::json!({
-        "type": "https://api.example.com/errors/internal",
-        "title": "Internal Server Error",
-        "status": 500,
-        "detail": "An unexpected error occurred.",
-    });
-
-    match Response::builder()
-        .status(StatusCode::INTERNAL_SERVER_ERROR)
-        .header("content-type", "application/problem+json")
-        .body(Body::from(body.to_string()))
-    {
-        Ok(response) => response,
-        Err(_) => Response::new(Body::from("Internal Server Error")),
-    }
+    errors::Problem::new(errors::ApiError::Internal).into_response()
 }
 
 #[cfg(test)]
