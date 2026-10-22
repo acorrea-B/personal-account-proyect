@@ -11,6 +11,7 @@
 pub mod config;
 pub mod errors;
 pub mod events;
+pub mod middleware;
 pub mod router;
 pub mod state;
 
@@ -167,26 +168,12 @@ fn internal_error() -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::AppState;
     use axum::http::Request;
-    use sqlx::postgres::PgPoolOptions;
-
-    /// A state with a lazy pool: the test never queries the database.
-    fn test_state() -> AppState {
-        AppState {
-            pool: PgPoolOptions::new()
-                .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/postgres")
-                .expect("the connection string is valid"),
-            supabase_url: "http://127.0.0.1:54321".to_string(),
-            service_role_key: "test-service-role-key".to_string(),
-            jwt_secret: "test-jwt-secret".to_string(),
-            jwt_issuer: "supabase".to_string(),
-            jwt_audience: "authenticated".to_string(),
-        }
-    }
 
     #[tokio::test]
     async fn the_health_route_answers_ok() {
-        let router = build_router(test_state());
+        let router = build_router(AppState::for_tests());
 
         let response = router
             .oneshot(
