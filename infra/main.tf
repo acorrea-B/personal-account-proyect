@@ -65,7 +65,7 @@ resource "scaleway_function" "api" {
   sandbox      = "v2"
   min_scale    = 0
   max_scale    = 1
-  memory_limit = 512
+  memory_limit = 128
   timeout      = 30
 
   zip_file = "${path.module}/function.zip"
