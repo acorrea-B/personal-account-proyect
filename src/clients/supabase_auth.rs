@@ -53,6 +53,11 @@ pub struct Session {
 pub struct SupabaseAuthClient {
     http: reqwest::Client,
     base_url: String,
+    /// The gateway prefix of the auth routes: EMPTY in the standard
+    /// deployment (the paths carry `/auth/v1` inline); `/auth/v1` means
+    /// RAW gotrue — the base ends in the prefix and each path STRIPS it
+    /// (the raw gotrue serves `/signup` and `/token`, without the gate).
+    auth_prefix: &'static str,
     publishable_key: String,
     service_key: String,
     /// Fixed acotation of the transient retries (R7).
@@ -66,12 +71,21 @@ impl SupabaseAuthClient {
         service_key: &str,
         timeout: Duration,
     ) -> Self {
+        let base_url = base_url.trim_end_matches('/');
+        let auth_prefix = if base_url.ends_with("/auth/v1") {
+            "/auth/v1"
+        } else {
+            ""
+        };
+        // The raw base loses its prefix too: the routes resolve at its root.
+        let base_url = base_url.strip_suffix("/auth/v1").unwrap_or(base_url);
         Self {
             http: reqwest::Client::builder()
                 .timeout(timeout)
                 .build()
                 .expect("the reqwest client of Supabase always builds"),
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: base_url.to_string(),
+            auth_prefix,
             publishable_key: publishable_key.to_string(),
             service_key: service_key.to_string(),
             retries: 2,
@@ -183,6 +197,13 @@ impl SupabaseAuthClient {
         };
 
         for attempt in 0..=self.retries {
+            // The raw gotrue removes the gateway prefix of the path (the
+            // paths carry it inline); the standard deployment keeps it.
+            let path = if self.auth_prefix.is_empty() {
+                path
+            } else {
+                path.trim_start_matches("/auth/v1")
+            };
             let mut request = self
                 .http
                 .request(method.clone(), format!("{}{path}", self.base_url))
@@ -287,8 +308,31 @@ fn session_of(response: &Value) -> Result<Session, ApiError> {
 /// Mapping of the Supabase error codes to the closed catalogue
 /// (contracts/errors.md). The unknown codes keep the generic internal
 /// detail and their code stays in the log only (§13.4).
+///
+/// Two dialects of goTrue travel here: the MODERN shape
+/// (`code`/`error_code`/`msg`) and the LEGACY one of the older stacks
+/// (`error`/`error_description` — e.g. `invalid_grant` + "Invalid login
+/// credentials" for the failed login, `Invalid Refresh Token: …` for the
+/// renewal) — one vocabulary to the catalogue either way.
 fn auth_error_of(status: StatusCode, document: &Value) -> ApiError {
     let code = document["error_code"].as_str().unwrap_or_default();
+    if !code.is_empty() {
+        return modern_error_of(code, status, document);
+    }
+    let error = document["error"].as_str().unwrap_or_default();
+    if !error.is_empty() {
+        return legacy_error_of(
+            error,
+            document["error_description"].as_str().unwrap_or_default(),
+            status,
+        );
+    }
+    tracing::warn!(status = %status, "a Supabase error without a recognized shape");
+    ApiError::Internal
+}
+
+/// The modern shape (T008).
+fn modern_error_of(code: &str, status: StatusCode, _document: &Value) -> ApiError {
     match code {
         "invalid_credentials" => ApiError::InvalidCredentials,
         "email_not_confirmed" => ApiError::EmailNotVerified,
@@ -304,6 +348,40 @@ fn auth_error_of(status: StatusCode, document: &Value) -> ApiError {
         },
         _ => {
             tracing::warn!(error_code = %code, status = %status, "unmapped Supabase error");
+            ApiError::Internal
+        }
+    }
+}
+
+/// The legacy shape (the older goTrue stacks): `invalid_grant` carries the
+/// meaning in the description ("Invalid login credentials" vs the Refresh
+/// Token family); the rest have a 1:1 name.
+fn legacy_error_of(error: &str, description: &str, status: StatusCode) -> ApiError {
+    match error {
+        "invalid_grant" | "invalid_credentials" => {
+            if description.contains("Email not confirmed") {
+                ApiError::EmailNotVerified
+            } else if description.contains("Refresh Token") {
+                if description.contains("Already Used") {
+                    ApiError::RefreshTokenReused
+                } else {
+                    ApiError::InvalidRefreshToken {
+                        detail: "The refresh token does not exist or expired.".to_string(),
+                    }
+                }
+            } else {
+                ApiError::InvalidCredentials
+            }
+        }
+        "email_not_confirmed" => ApiError::EmailNotVerified,
+        "user_already_registered" => ApiError::EmailExists,
+        "weak_password" => ApiError::WeakPassword,
+        "validation_failed" => ApiError::EmailMalformed,
+        "over_request_rate_limit" | "over_email_send_rate_limit" => ApiError::RateLimited {
+            retry_after_seconds: 60,
+        },
+        _ => {
+            tracing::warn!(error = %error, status = %status, "unmapped legacy Supabase error");
             ApiError::Internal
         }
     }
