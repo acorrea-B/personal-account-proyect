@@ -16,18 +16,18 @@ async fn the_public_routes_answer_503_from_the_stub() {
     };
 
     for (method, path, status) in [
-        // The real handlers of T012: the empty JSON is not the request
-        // shape of the DTOs (the required fields are missing) — the
-        // rejection of the extractor is the 400 canonical.
+        // The wired handlers (T012/T015): an empty JSON is the request
+        // shape of NONE of the four DTOs (the required fields are
+        // missing) — the extractor's rejection is the 400 canonical in
+        // everyone; the 503 remains for the real dependency failures.
         ("POST", "/v1/auth/register", StatusCode::BAD_REQUEST),
         (
             "POST",
             "/v1/auth/resend-verification",
             StatusCode::BAD_REQUEST,
         ),
-        // login/refresh stay stubs (T015 wires them): the 503 canonical.
-        ("POST", "/v1/auth/login", StatusCode::SERVICE_UNAVAILABLE),
-        ("POST", "/v1/auth/refresh", StatusCode::SERVICE_UNAVAILABLE),
+        ("POST", "/v1/auth/login", StatusCode::BAD_REQUEST),
+        ("POST", "/v1/auth/refresh", StatusCode::BAD_REQUEST),
     ] {
         let response = call(&app, method, path, Some(serde_json::json!({}))).await;
         assert_eq!(

@@ -42,11 +42,6 @@ async fn stub_protected_503(_user: AuthenticatedUser) -> Problem {
     Problem::new(ApiError::DependencyUnavailable)
 }
 
-/// The stub of the public routes until their handlers land (T011+).
-async fn stub_public_503() -> Problem {
-    Problem::new(ApiError::DependencyUnavailable)
-}
-
 /// The stub of the version route (its `id` is a parameter). The
 /// `AuthenticatedUser` extractor goes FIRST: a handler without it is
 /// anonymous even nested in this router — the wiring test caught the hole
@@ -73,15 +68,16 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
-        // The register flow (T012, US1) — the login/refresh stay stubs until
-        // T015.
+        // The register flow (T012) and the session flow (T015, US2) — the
+        // revoke stays the protected stub until the session-revocation
+        // design (plan §16.6) resolves.
         .route("/v1/auth/register", post(handlers::register))
         .route(
             "/v1/auth/resend-verification",
             post(handlers::resend_verification),
         )
-        .route("/v1/auth/login", post(stub_public_503))
-        .route("/v1/auth/refresh", post(stub_public_503))
+        .route("/v1/auth/login", post(handlers::login))
+        .route("/v1/auth/refresh", post(handlers::refresh))
         .merge(protected)
         .with_state(state)
 }
@@ -191,29 +187,34 @@ mod tests {
         );
     }
 
-    /// The public route of a stub answers 503 — no credential required
-    /// (FR-011).
+    /// The public route without the contract body: the wired handlers
+    /// (T012/T015) answer the 400 canonical — never a plain text of axum
+    /// (FR-011 keeps the routes public).
     #[tokio::test]
-    async fn the_public_stub_answers_503_without_credential() {
+    async fn the_public_route_without_body_answers_the_400_canonical() {
         let router = build_router(AppState::for_tests());
 
-        let response = router
-            .oneshot(
-                Request::post("/v1/auth/login")
-                    .body(Body::empty())
-                    .expect("the request is valid"),
-            )
-            .await
-            .expect("the router never fails");
+        for path in ["/v1/auth/register", "/v1/auth/login"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post(path)
+                        .body(Body::empty())
+                        .expect("the request is valid"),
+                )
+                .await
+                .expect("the router never fails");
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok()),
-            Some("application/problem+json")
-        );
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "route {path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok()),
+                Some("application/problem+json"),
+                "route {path}"
+            );
+        }
     }
 
     /// The expired credential is never a generic unauthorized: the renewal

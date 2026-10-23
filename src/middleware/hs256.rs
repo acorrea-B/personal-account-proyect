@@ -144,4 +144,26 @@ mod tests {
             Err(ApiError::Unauthorized { .. })
         ));
     }
+
+    /// The invalid signature (another secret signed): the same plain
+    /// unauthorized — the internal cause never travels (§13.4).
+    #[tokio::test]
+    async fn a_token_of_another_signature_rejects_unauthorized() {
+        let verifier = Hs256Verifier::new("test-secret", None, "authenticated");
+        assert!(matches!(
+            verifier.verify(&token("otro-secreto", None)).await,
+            Err(ApiError::Unauthorized { .. })
+        ));
+    }
+
+    /// The garbage that is not even a JWT: the unauthorized of the
+    /// catalogue, never the 500.
+    #[tokio::test]
+    async fn a_token_that_is_not_a_jwt_rejects_unauthorized() {
+        let verifier = Hs256Verifier::new("test-secret", None, "authenticated");
+        assert!(matches!(
+            verifier.verify("no-es-un-jwt").await,
+            Err(ApiError::Unauthorized { .. })
+        ));
+    }
 }

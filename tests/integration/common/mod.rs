@@ -54,17 +54,20 @@ fn load_env_files() {
         }
     }
 
-    // The JWKS URL derives from the base when it does not travel: the raw
-    // gotrue of the local stack of tests does not gate the path; the
-    // platform does.
+    // The JWKS URL derives from the base when it does not travel — the
+    // ending rule again: the auth-v1-rooted base is the raw gotrue; the
+    // platform base gains the gateway prefix.
     if std::env::var("SUPABASE_JWKS_URL").is_err() {
         if let Ok(base) = std::env::var("SUPABASE_URL") {
-            let path = if base.contains("127.0.0.1") || base.contains("localhost") {
-                "/.well-known/jwks.json"
+            let root = base.trim_end_matches('/');
+            if root.ends_with("/auth/v1") {
+                std::env::set_var("SUPABASE_JWKS_URL", format!("{root}/.well-known/jwks.json"));
             } else {
-                "/auth/v1/.well-known/jwks.json"
-            };
-            std::env::set_var("SUPABASE_JWKS_URL", format!("{base}{path}"));
+                std::env::set_var(
+                    "SUPABASE_JWKS_URL",
+                    format!("{root}/auth/v1/.well-known/jwks.json"),
+                );
+            }
         }
     }
 }
@@ -142,19 +145,35 @@ pub async fn json_of(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&body).expect("the integration answers are always valid JSON")
 }
 
+/// The fixture user (via the admin API, R8): the credentials belong to the
+/// test that created them — the id of the flow (the mirror, the admin
+/// confirmations) and the email/password of the flows of login.
+pub struct TestUser {
+    /// The mirror and the security-matrix tasks (T013/T022) consume it.
+    #[allow(dead_code)]
+    pub id: String,
+    pub email: String,
+    pub password: String,
+    #[allow(dead_code)] // the flows assert it when they land
+    pub verified: bool,
+}
+
 /// Fixture via the admin API (R8): one account verificado/no verificado —
-/// returns the id of the user. Unconsumed until its flow lands (T011+).
-#[expect(dead_code)]
-pub async fn admin_create_user(verified: bool) -> String {
+/// returns the whole fixture (the credentials live only in the test).
+pub async fn admin_create_user(verified: bool) -> TestUser {
     let base = std::env::var("SUPABASE_URL").expect("the guard checked it");
     let service = std::env::var("SERVICE_ROLE_KEY").expect("the guard checked it");
 
-    // Direct gotrue (the local stack, without a gateway): the admin routes
-    // go without the `/auth/v1` prefix; with a gateway, with it.
-    let prefix = if base.contains("127.0.0.1") || base.contains("localhost") {
-        ""
+    // The same ending rule of the app's client — and the prefix flips: the
+    // raw gotrue (the base rooted in /auth/v1) serves /admin/users at its
+    // root; the standard deployment (the base of the platform) gates the
+    // route with /auth/v1.
+    let root = base.trim_end_matches('/');
+    let root = root.strip_suffix("/auth/v1").unwrap_or(root);
+    let url = if base.trim_end_matches('/').ends_with("/auth/v1") {
+        format!("{root}/admin/users") // raw gotrue: the route at its root
     } else {
-        "/auth/v1"
+        format!("{root}/auth/v1/admin/users") // the standard gateway
     };
 
     let email = format!("it-{}@test.local", uuid::Uuid::new_v4());
@@ -162,8 +181,9 @@ pub async fn admin_create_user(verified: bool) -> String {
 
     let client = reqwest::Client::new();
     let response = client
-        .post(format!("{base}{prefix}/admin/users"))
+        .post(url)
         .header("apikey", &service)
+        .header("authorization", format!("Bearer {service}"))
         .header("content-type", "application/json")
         .json(&serde_json::json!({
             "email": email,
@@ -175,10 +195,15 @@ pub async fn admin_create_user(verified: bool) -> String {
         .expect("the admin API answers");
 
     let document: serde_json::Value = response.json().await.expect("the admin JSON");
-    document["id"]
-        .as_str()
-        .expect("the admin fixture always carries the id")
-        .to_string()
+    TestUser {
+        id: document["id"]
+            .as_str()
+            .expect("the admin fixture always carries the id")
+            .to_string(),
+        email,
+        password,
+        verified,
+    }
 }
 
 /// The login of a fixture email+password (the harness proves flows end to
@@ -189,16 +214,19 @@ pub async fn login(email: &str, password: &str) -> serde_json::Value {
     let base = std::env::var("SUPABASE_URL").expect("the guard checked it");
     let service = std::env::var("SERVICE_ROLE_KEY").expect("the guard checked it");
 
-    let prefix = if base.contains("127.0.0.1") || base.contains("localhost") {
-        ""
+    let root = base.trim_end_matches('/');
+    let root = root.strip_suffix("/auth/v1").unwrap_or(root);
+    let url = if base.trim_end_matches('/').ends_with("/auth/v1") {
+        format!("{root}/token?grant_type=password") // raw gotrue at its root
     } else {
-        "/auth/v1"
+        format!("{root}/auth/v1/token?grant_type=password") // the gateway
     };
 
     let client = reqwest::Client::new();
     let response = client
-        .post(format!("{base}{prefix}/token?grant_type=password"))
+        .post(url)
         .header("apikey", &service)
+        .header("authorization", format!("Bearer {service}"))
         .header("content-type", "application/json")
         .json(&serde_json::json!({ "email": email, "password": password }))
         .send()
