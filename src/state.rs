@@ -97,6 +97,11 @@ pub struct AppState {
     /// the operator's ruling: the rotation is mandatory): the extractor
     /// checks it after the signature.
     pub session_check: SessionCheck,
+    /// The CV's byte cap (FR-015, env-configurable R2/§12.2).
+    pub cv_max_bytes: usize,
+    /// The CV's retention window (FR-017, SC-005): the archived versions
+    /// kept (the purge prunes the surplus in the same tx).
+    pub cv_versions_retention: i64,
 }
 
 impl AppState {
@@ -127,6 +132,8 @@ impl AppState {
         Ok(Self {
             pool,
             session_check: SessionCheck::default(),
+            cv_max_bytes: config.cv_max_bytes,
+            cv_versions_retention: config.cv_versions_retention,
             supabase_url: config.supabase_url.clone(),
             service_role_key: config.service_role_key.clone(),
             // Only the test path signs tokens with it (test_token): the
@@ -166,6 +173,8 @@ impl AppState {
             // The test path: trusted (the HS256 credentials carry no
             // Supabase session behind them).
             session_check: SessionCheck::trusted(),
+            cv_max_bytes: 51200,
+            cv_versions_retention: 10,
             supabase_url: "http://127.0.0.1:54321".to_string(),
             service_role_key: "test-service-role-key".to_string(),
             jwt_secret: "test-jwt-secret".to_string(),
