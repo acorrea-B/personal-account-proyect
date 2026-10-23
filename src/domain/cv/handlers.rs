@@ -568,4 +568,142 @@ mod tests {
         let empty = json_of(empty).await;
         assert_eq!(empty["versions"].as_array().expect("list").len(), 0);
     }
+
+    /// The precondition's shape: an `If-Unmodified-Since` that is not an
+    /// ISO8601 instant IS the 400 of the shape (the contract's Q2 — the
+    /// gate runs before the write's tx).
+    #[tokio::test]
+    async fn an_unreadable_precondition_answers_the_400_of_the_shape() {
+        let Some(pool) = db().await else {
+            return;
+        };
+        let user = test_support::create_user(&pool).await;
+
+        let response = post(
+            &pool,
+            user,
+            body_of("lo que sea"),
+            Some("not-an-instant".to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = json_of(response).await;
+        assert!(body["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("bad-request")));
+    }
+
+    /// The D18's accounting over the handler: the save's event carries
+    /// `purged_count` when the window closed — 12 chained saves cross the
+    /// boundary of the retention (the purge branch of the meta travels).
+    #[tokio::test]
+    async fn the_chained_saves_cross_the_retention_and_the_meta_records_the_purge() {
+        let Some(pool) = db().await else {
+            return;
+        };
+        let user = test_support::create_user(&pool).await;
+
+        for round in 1..=12 {
+            let response = post(
+                &pool,
+                user,
+                body_of(&format!("CV {round} encadenado")),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::CREATED, "round {round}");
+        }
+
+        // The purge happened on the last save (11 archives in the window
+        // of 10): the handler's meta branch travelled — the LIVE content
+        // is the 12th and the history holds exactly 10.
+        let live =
+            json_of(get_text(State(state_of(&pool)), HeaderMap::new(), user_of(user)).await).await;
+        assert_eq!(live["cv"]["content"], "CV 12 encadenado");
+        let listed = list_versions(State(state_of(&pool)), HeaderMap::new(), user_of(user)).await;
+        let listed = json_of(listed).await;
+        assert_eq!(listed["versions"].as_array().expect("list").len(), 10);
+    }
+
+    /// The EMPTY CV: the 404 of the catalogue — the only not-found the
+    /// contract expects in the reads.
+    #[tokio::test]
+    async fn the_empty_cv_answers_the_404_of_the_catalogue() {
+        let Some(pool) = db().await else {
+            return;
+        };
+        let user = test_support::create_user(&pool).await;
+
+        let response = get_text(State(state_of(&pool)), HeaderMap::new(), user_of(user)).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = json_of(response).await;
+        assert!(body["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("not-found")));
+
+        // The listing of the empty: 200 with its empty array (the
+        // contract's shape, never a 404).
+        let listed = list_versions(State(state_of(&pool)), HeaderMap::new(), user_of(user)).await;
+        assert_eq!(listed.status(), StatusCode::OK);
+        assert_eq!(
+            json_of(listed).await["versions"]
+                .as_array()
+                .expect("list")
+                .len(),
+            0
+        );
+    }
+
+    /// The repository's error face: a pool whose postgres never answers
+    /// turns the four handlers into the catalogue's 503 (the tx rolled
+    /// back, the reads honestly unknown) — never a 500, never a partial.
+    #[tokio::test]
+    async fn the_dead_pool_answers_the_dependency_503_in_the_four_handlers() {
+        let dead = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(500))
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/postgres")
+            .expect("the lazy pool takes any valid url");
+        let state = {
+            let mut state = AppState::for_tests();
+            state.pool = dead;
+            state
+        };
+
+        let post = post_text(
+            State(state.clone()),
+            HeaderMap::new(),
+            user_of(Uuid::new_v4()),
+            axum::body::Bytes::from(body_of("CV que nunca aterriza")),
+        )
+        .await;
+        assert_eq!(post.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(json_of(post).await["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("dependency-unavailable")));
+
+        let read = get_text(
+            State(state.clone()),
+            HeaderMap::new(),
+            user_of(Uuid::new_v4()),
+        )
+        .await;
+        assert_eq!(read.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let list = list_versions(
+            State(state.clone()),
+            HeaderMap::new(),
+            user_of(Uuid::new_v4()),
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let version = get_version(
+            State(state),
+            HeaderMap::new(),
+            user_of(Uuid::new_v4()),
+            axum::extract::Path(Uuid::new_v4()),
+        )
+        .await;
+        assert_eq!(version.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
