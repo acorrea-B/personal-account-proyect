@@ -76,6 +76,23 @@ fn load_env_files() {
         }
     }
 
+    // The CV-write limit of the TEST process (R2): the retention suites
+    // chain dozens of replacements inside ONE window — the R2 cap exists
+    // for the clients' traffic, not for the fixtures. The env (local or
+    // the CI's vars) keeps the word; here only the default lands.
+    if std::env::var("RATE_LIMIT_CV_WRITE_PER_MIN").is_err() {
+        std::env::set_var("RATE_LIMIT_CV_WRITE_PER_MIN", "10000");
+    }
+
+    // The Supabase timeout of the TEST process: the production contract
+    // keeps its 3s (R7), but the suites hammer ONE local stack from 28
+    // parallel tests — the goTruth's tail under load blurs past 3s and
+    // the honest 503 turns a green suite flaky. The env keeps its word;
+    // here only the test default lands.
+    if std::env::var("SUPABASE_TIMEOUT_SECS").is_err() {
+        std::env::set_var("SUPABASE_TIMEOUT_SECS", "10");
+    }
+
     // The JWKS URL derives from the base when it does not travel — the
     // ending rule again: the auth-v1-rooted base is the raw gotrue; the
     // platform base gains the gateway prefix.
@@ -157,6 +174,61 @@ pub async fn call(
         .oneshot(request)
         .await
         .expect("the router never fails")
+}
+
+/// The verdict of the capability probe: whether the machine's stack can
+/// CARRY the protected flows.
+pub enum Probe {
+    /// The gate verified and the handler spoke (2xx/404): carry the flow.
+    Carry,
+    /// The legacy's empty JWKS (the signature never verifies): document
+    /// and end — the CI's modern stack carries the suite instead.
+    Legacy,
+    /// Neither decisive nor legacy: a transient (503/429) the stack could
+    /// not clear in 3 tries, or an unexpected answer — the suite ends
+    /// silently (the CI decides). Never a spurious FAILURE.
+    Undecided,
+}
+
+/// The capability probe (learned.md, the protected suites): the FIRST
+/// protected call decides whether the machine's stack verifies its
+/// credentials. The legacy answers 401 to everything (the empty JWKS);
+/// the modern one answers decisively. A transient hiccup retries up to 3
+/// times before doubting — the probe never fails a suite, it only
+/// decides which runner carries it.
+pub async fn capability_probe<F, Fut>(mut call: F) -> Probe
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = axum::response::Response>,
+{
+    use axum::http::StatusCode;
+
+    for _ in 0..3 {
+        let response = call().await;
+        match response.status() {
+            // The gate decided: verified-and-served (2xx; 404 = a real
+            // handler answer too — the contract's not-found). The caller
+            // owns the body.
+            status if status.is_success() || status == StatusCode::NOT_FOUND => {
+                let _ = response;
+                return Probe::Carry;
+            }
+            // The legacy's empty JWKS: the signature never verifies here.
+            StatusCode::UNAUTHORIZED => return Probe::Legacy,
+            // Transient: clear once more (503 = the dependency, 429 = the
+            // limiter's window), then doubt.
+            StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS => {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                continue;
+            }
+            // Anything else: the stack cannot carry, the reason is loud.
+            status => {
+                tracing::warn!(status = %status, "the probe found an unexpected answer: the suite pends");
+                return Probe::Undecided;
+            }
+        }
+    }
+    Probe::Undecided
 }
 
 /// The body of the answer as JSON (the problem documents carry one).
@@ -279,7 +351,11 @@ pub async fn db_pool() -> Option<sqlx::PgPool> {
         tracing::warn!("the tests are skipped: DATABASE_URL is not local");
         return None;
     }
+    // The pool of the integration harness: TINY (the same reasoning of
+    // test_support::pool — 28 tests hammer ONE local postgres; the app's
+    // own pool carries its connections).
     let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
         .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(&url)
         .await
