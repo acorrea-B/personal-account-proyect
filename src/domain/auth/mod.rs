@@ -3,4 +3,5 @@
 //! arrives from the client; it arrives from the credential itself.
 
 pub mod dto;
+pub mod dto_session;
 pub mod handlers;

@@ -31,12 +31,21 @@ enum Auth {
     Service,
 }
 
-/// The credential pair the session flows exchange (FR-008): access token of
-/// use and refresh token of renewal.
+/// The complete session that Supabase answers to the session flows
+/// (login/renewal): the pair with its TTL and the public face of the user
+/// (FR-003: no more columns than id/email/verified/created_at) — the
+/// contract responses of login/renovation echo it verbatim.
 #[derive(Debug, Clone)]
-pub struct TokenPair {
+pub struct Session {
     pub access_token: String,
     pub refresh_token: String,
+    pub expires_in: u64,
+    pub user_id: Uuid,
+    pub user_email: String,
+    /// Supabase stamps the instant of the confirmation (`email_confirmed_at`
+    /// / `confirmed_at`): its presence is the verified flag.
+    pub verified: bool,
+    pub user_created_at: String,
 }
 
 /// The REST client of Supabase Auth.
@@ -93,7 +102,7 @@ impl SupabaseAuthClient {
         &self,
         email: &str,
         password: &str,
-    ) -> Result<TokenPair, ApiError> {
+    ) -> Result<Session, ApiError> {
         let response = self
             .request(
                 reqwest::Method::POST,
@@ -102,12 +111,12 @@ impl SupabaseAuthClient {
                 Some(json!({ "email": email, "password": password })),
             )
             .await?;
-        tokens_of(&response)
+        session_of(&response)
     }
 
     /// `POST /auth/v1/token?grant_type=refresh_token` (FR-008): renewal of
     /// the session (`invalid-refresh-token` | `refresh-token-reused`).
-    pub async fn refresh(&self, refresh_token: &str) -> Result<TokenPair, ApiError> {
+    pub async fn refresh(&self, refresh_token: &str) -> Result<Session, ApiError> {
         let response = self
             .request(
                 reqwest::Method::POST,
@@ -116,7 +125,7 @@ impl SupabaseAuthClient {
                 Some(json!({ "refresh_token": refresh_token })),
             )
             .await?;
-        tokens_of(&response)
+        session_of(&response)
     }
 
     /// `POST /auth/v1/resend` (FR-005): the resend of the confirmation;
@@ -238,22 +247,41 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_millis((150 * (attempt + 1) * 3) as u64)
 }
 
-/// The credential pair of a session answer (FR-008).
-fn tokens_of(response: &Value) -> Result<TokenPair, ApiError> {
-    match (
-        response["access_token"].as_str(),
-        response["refresh_token"].as_str(),
-    ) {
-        (Some(access), Some(refresh)) if !access.is_empty() && !refresh.is_empty() => {
-            Ok(TokenPair {
-                access_token: access.to_string(),
-                refresh_token: refresh.to_string(),
-            })
-        }
-        // A 200 without credentials is a Supabase misconfiguration: nothing
-        // of the contract travels (FR-003 remains enforced).
-        _ => Err(ApiError::Internal),
+/// The full session of a session answer (login/renewal): pair + TTL + the
+/// public face of the user. A 200 without the contract shape is a Supabase
+/// misconfiguration: internal (§13.4), never partial credentials.
+fn session_of(response: &Value) -> Result<Session, ApiError> {
+    let access = response["access_token"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    let refresh = response["refresh_token"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+    let expires = response["expires_in"].as_u64();
+    let user = &response["user"];
+    let id = user["id"].as_str().and_then(|id| Uuid::parse_str(id).ok());
+    let email = user["email"].as_str().filter(|value| !value.is_empty());
+    let created = user["created_at"]
+        .as_str()
+        .filter(|value| !value.is_empty());
+
+    if let (Some(access), Some(refresh), Some(expires), Some(id), Some(email), Some(created)) =
+        (access, refresh, expires, id, email, created)
+    {
+        // Supabase stamps the instant of the confirmation when the account
+        // verifies; either of the two fields (the legacy/local naming) works.
+        return Ok(Session {
+            access_token: access.to_string(),
+            refresh_token: refresh.to_string(),
+            expires_in: expires,
+            user_id: id,
+            user_email: email.to_string(),
+            verified: user["email_confirmed_at"].as_str().is_some()
+                || user["confirmed_at"].as_str().is_some(),
+            user_created_at: created.to_string(),
+        });
     }
+    Err(ApiError::Internal)
 }
 
 /// Mapping of the Supabase error codes to the closed catalogue
@@ -285,8 +313,20 @@ fn auth_error_of(status: StatusCode, document: &Value) -> ApiError {
 mod tests {
     use super::*;
     use axum::Json;
+    use serde_json::json;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+
+    /// The user that the 200 responses of the fixtures carry: the minimal
+    /// shape of the confirmation done (the Session parse requires it).
+    fn session_user() -> serde_json::Value {
+        json!({
+            "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+            "email": "user@mail.com",
+            "email_confirmed_at": "2026-01-01T00:00:00Z",
+            "created_at": "2026-01-01T00:00:00Z"
+        })
+    }
 
     /// One canned HTTP server per case: it answers with the given response
     /// (constant or per attempt), counts the hits (retries of R7) and
@@ -451,14 +491,14 @@ mod tests {
             problem(
                 StatusCode::OK,
                 serde_json::json!({
-                    "access_token": "new-access", "refresh_token": "new-refresh"
+                    "access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 3600, "user": session_user()
                 }),
             )
         })
         .await;
-        let pair = client(&base).refresh("valid").await.unwrap();
-        assert_eq!(pair.access_token, "new-access");
-        assert_eq!(pair.refresh_token, "new-refresh");
+        let session = client(&base).refresh("valid").await.unwrap();
+        assert_eq!(session.access_token, "new-access");
+        assert_eq!(session.refresh_token, "new-refresh");
     }
 
     /// The retries (R7): a 5xx the first time does not fail the call —
@@ -475,18 +515,18 @@ mod tests {
                 problem(
                     StatusCode::OK,
                     serde_json::json!({
-                        "access_token": "access", "refresh_token": "refresh"
+                        "access_token": "access", "refresh_token": "refresh", "expires_in": 3600, "user": session_user()
                     }),
                 )
             }
         })
         .await;
 
-        let pair = client(&base)
+        let session = client(&base)
             .sign_in_with_password("user@mail.com", "Passw0rd1")
             .await
             .unwrap();
-        assert_eq!(pair.access_token, "access");
+        assert_eq!(session.access_token, "access");
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 

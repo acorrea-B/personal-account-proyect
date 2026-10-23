@@ -15,7 +15,9 @@ use serde::Serialize;
 use uuid::Uuid;
 use validator::Validate;
 
+use crate::clients::supabase_auth::Session;
 use crate::domain::auth::dto::{RegisterRequest, ResendRequest};
+use crate::domain::auth::dto_session::{LoginRequest, RefreshRequest};
 use crate::errors::{ApiError, Problem};
 use crate::events::{Event, Outcome, Taxonomy};
 use crate::state::AppState;
@@ -189,6 +191,145 @@ pub async fn resend_verification(
     }
 }
 
+/// The contract body of login/renewal (FR-006): the pair echoes verbatim,
+/// the user in its public face. The `Session` of the client carries it.
+fn session_response(session: &Session) -> serde_json::Value {
+    serde_json::json!({
+        "access_token": session.access_token,
+        "refresh_token": session.refresh_token,
+        "expires_in": session.expires_in,
+        "user": {
+            "id": session.user_id,
+            "email": session.user_email,
+            "verified": session.verified,
+            "created_at": session.user_created_at,
+        },
+    })
+}
+
+/// `POST /v1/auth/login` (FR-006, US2): the normalized email travels to
+/// Supabase — a wrong shape of credential is `invalid-credentials` (401),
+/// identical and comparable in time for a bad password and for a
+/// nonexistent email (SC-004, the client resolves the mapping). The pair
+/// answers complete of the contract: tokens + TTL + the user.
+pub async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<LoginRequest>, JsonRejection>,
+) -> Response {
+    const PATH: &str = "/v1/auth/login";
+
+    let mut request = match body {
+        Ok(Json(request)) => request,
+        Err(rejection) => return bad_request(rejection, PATH),
+    };
+    request.email = request.email.trim().to_lowercase();
+
+    match state
+        .supabase_auth
+        .sign_in_with_password(&request.email, &request.password)
+        .await
+    {
+        Ok(session) => {
+            Event::new(
+                Taxonomy::AuthLoginSucceeded,
+                Outcome::Accepted,
+                request_id_of(&headers),
+                Some(session.user_id.to_string()),
+                None,
+                Event::no_meta(),
+            )
+            .emit();
+            (StatusCode::OK, Json(session_response(&session))).into_response()
+        }
+        Err(error @ (ApiError::InvalidCredentials | ApiError::EmailNotVerified)) => {
+            // The reason of the event is a catalogue slug (R9): the two
+            // variants of this arm, verbatim — and the match does not
+            // consume the error (unit variants).
+            let reason = match error {
+                ApiError::InvalidCredentials => "invalid-credentials",
+                ApiError::EmailNotVerified => "email-not-verified",
+                _ => unreachable!("the arm admits just these two variants"),
+            };
+            let mut meta = Event::no_meta();
+            meta.insert(
+                "reason".to_string(),
+                serde_json::Value::String(reason.into()),
+            );
+
+            Event::new(
+                Taxonomy::AuthLoginFailed,
+                Outcome::Rejected,
+                request_id_of(&headers),
+                None,
+                None,
+                meta,
+            )
+            .emit();
+            Problem::new(error).on(PATH).into_response()
+        }
+        Err(error) => Problem::new(error).on(PATH).into_response(),
+    }
+}
+
+/// `POST /v1/auth/refresh` (FR-008, US2): the renewal rotates the pair —
+/// the answer carries the NEW pair and the previous one stops serving; the
+/// reuse (FR-008) invalidates the complete session at Supabase side.
+pub async fn refresh(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<RefreshRequest>, JsonRejection>,
+) -> Response {
+    const PATH: &str = "/v1/auth/refresh";
+    const REUSED: &str = "refresh-token-reused";
+    const INVALID: &str = "invalid-refresh-token";
+
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(rejection) => return bad_request(rejection, PATH),
+    };
+
+    match state.supabase_auth.refresh(&request.refresh_token).await {
+        Ok(session) => {
+            Event::new(
+                Taxonomy::AuthSessionRefreshed,
+                Outcome::Accepted,
+                request_id_of(&headers),
+                Some(session.user_id.to_string()),
+                None,
+                Event::no_meta(),
+            )
+            .emit();
+            (StatusCode::OK, Json(session_response(&session))).into_response()
+        }
+        Err(error @ (ApiError::InvalidRefreshToken { .. } | ApiError::RefreshTokenReused)) => {
+            // R9 again: the two reasons closed of `auth.refresh_rejected`.
+            let reason = match error {
+                ApiError::RefreshTokenReused => REUSED,
+                ApiError::InvalidRefreshToken { .. } => INVALID,
+                _ => unreachable!("the arm admits just these two variants"),
+            };
+            let mut meta = Event::no_meta();
+            meta.insert(
+                "reason".to_string(),
+                serde_json::Value::String(reason.into()),
+            );
+
+            Event::new(
+                Taxonomy::AuthRefreshRejected,
+                Outcome::Rejected,
+                request_id_of(&headers),
+                None,
+                None,
+                meta,
+            )
+            .emit();
+            Problem::new(error).on(PATH).into_response()
+        }
+        Err(error) => Problem::new(error).on(PATH).into_response(),
+    }
+}
+
 /// The validation errors map to the catalogue: the email field →
 /// `email-malformed`; the password → `weak-password` (R4, with requirements
 /// in the extension of the document).
@@ -243,6 +384,7 @@ mod tests {
         let fake: FakeSupabase = Arc::new(Mutex::new((200, SIGNUP_USER.to_string())));
         let app = Router::new()
             .route("/auth/v1/signup", post_route(serve_supabase))
+            .route("/auth/v1/token", post_route(serve_supabase))
             .route("/auth/v1/resend", post_route(serve_supabase))
             .with_state(fake.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -468,5 +610,154 @@ mod tests {
         assert!(password_policy("short").is_err());
         assert!(password_policy("sin numeros").is_err());
         assert!(password_policy("12345678").is_err());
+    }
+
+    /// The session answer the fake token grant carries: the pair + TTL +
+    /// the confirmed user (verified true — the login of the confirmation).
+    const TOKEN_BODY: &str = r#"{
+        "access_token": "the-access", "refresh_token": "the-refresh",
+        "expires_in": 3600,
+        "user": {
+            "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+            "email": "juan@example.com",
+            "email_confirmed_at": "2026-10-23T00:00:00Z",
+            "created_at": "2026-10-23T00:00:00Z"
+        }
+    }"#;
+
+    async fn login_of(state: &AppState, email: &str, password: &str) -> (StatusCode, Value) {
+        let response = login(
+            State(state.clone()),
+            HeaderMap::new(),
+            Ok(Json(LoginRequest {
+                email: email.to_string(),
+                password: password.to_string(),
+            })),
+        )
+        .await;
+        let status = response.status();
+        (status, body_of(response).await)
+    }
+
+    async fn refresh_of(state: &AppState, token: &str) -> (StatusCode, Value) {
+        let response = refresh(
+            State(state.clone()),
+            HeaderMap::new(),
+            Ok(Json(RefreshRequest {
+                refresh_token: token.to_string(),
+            })),
+        )
+        .await;
+        let status = response.status();
+        (status, body_of(response).await)
+    }
+
+    /// The login of the contract (FR-006): the complete pair — tokens, TTL
+    /// (dynamic, not hardcoded from any side) and the user with the state
+    /// of verification real of Supabase.
+    #[tokio::test]
+    async fn the_login_of_the_contract_carries_the_pair_and_the_user() {
+        let (state, fake) = test_state().await;
+        set_response(&fake, 200, TOKEN_BODY);
+
+        let (status, body) = login_of(&state, "juan@example.com", "contraseña1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["access_token"], "the-access");
+        assert_eq!(body["refresh_token"], "the-refresh");
+        assert_eq!(body["expires_in"], 3600);
+        assert_eq!(body["user"]["email"], "juan@example.com");
+        assert_eq!(body["user"]["verified"], true, "the confirmed user");
+    }
+
+    /// The failure of the catalog: incorrect credentials and nonexistent
+    /// email resolve the same 401 (SC-004), and the arm emits `reason` (D18).
+    #[tokio::test]
+    async fn a_failed_login_answers_the_401_of_the_catalogue() {
+        let (state, fake) = test_state().await;
+        set_response(
+            &fake,
+            400,
+            r#"{"error_code": "invalid_credentials", "msg": "Invalid login credentials"}"#,
+        );
+
+        let (status, body) = login_of(&state, "juan@example.com", "otra-pass").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("invalid-credentials"));
+    }
+
+    /// The unconfirmed account: 403 with `can_resend` (the extension of the
+    /// catalogue; the handler passes the 403 through with the extension
+    /// built in errors.rs).
+    #[tokio::test]
+    async fn the_login_of_an_unconfirmed_account_answers_403_with_can_resend() {
+        let (state, fake) = test_state().await;
+        set_response(
+            &fake,
+            400,
+            r#"{"error_code": "email_not_confirmed", "msg": "Email not confirmed"}"#,
+        );
+
+        let (status, body) = login_of(&state, "juan@example.com", "contraseña1").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("email-not-verified"));
+        assert_eq!(body["can_resend"], true);
+    }
+
+    /// The renewal rotates the pair: the response carries the NEW pair of
+    /// the fixture and the user (FR-008).
+    #[tokio::test]
+    async fn the_renewal_answers_a_fresh_pair() {
+        let (state, fake) = test_state().await;
+        set_response(&fake, 200, TOKEN_BODY);
+
+        let (status, body) = refresh_of(&state, "the-old-refresh").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["access_token"], "the-access");
+        assert_eq!(body["refresh_token"], "the-refresh");
+    }
+
+    /// The reuse of a renewal credential: 401 of the catalogue (the client
+    /// T008 maps `refresh_token_already_used` — the whole session dies at
+    /// the Supabase side).
+    #[tokio::test]
+    async fn the_reuse_of_a_refresh_token_answers_the_rejection() {
+        let (state, fake) = test_state().await;
+        set_response(
+            &fake,
+            400,
+            r#"{"error_code": "refresh_token_already_used", "msg": "Invalid Refresh Token"}"#,
+        );
+
+        let (status, body) = refresh_of(&state, "the-reused").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("refresh-token-reused"));
+    }
+
+    /// A refresh credential that does not exist: `invalid-refresh-token`
+    /// (401 — the contract; never the generic 500).
+    #[tokio::test]
+    async fn an_unknown_refresh_token_answers_invalid_refresh_token() {
+        let (state, fake) = test_state().await;
+        set_response(
+            &fake,
+            400,
+            r#"{"error_code": "refresh_token_not_found", "msg": "Invalid Refresh Token"}"#,
+        );
+
+        let (status, body) = refresh_of(&state, "the-unknown").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("invalid-refresh-token"));
     }
 }
