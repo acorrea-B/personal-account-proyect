@@ -27,7 +27,7 @@ pub struct Config {
     pub host: String,
     pub database_url: String,
     pub supabase_url: String,
-    pub supabase_jwt_secret: String,
+    pub supabase_jwks_url: String,
     pub service_role_key: String,
     /// Public key of the new Supabase system (sb_publishable_...) for the
     /// public flows of Auth (the legacy 'anon' occupies the same slot).
@@ -59,7 +59,7 @@ impl Config {
 
         let database_url = required("DATABASE_URL")?;
         let supabase_url = required("SUPABASE_URL")?;
-        let supabase_jwt_secret = required("SUPABASE_JWT_SECRET")?;
+        let supabase_jwks_url = required("SUPABASE_JWKS_URL")?;
         let service_role_key = required("SERVICE_ROLE_KEY")?;
         let supabase_publishable_key = required("SUPABASE_PUBLISHABLE_KEY")?;
 
@@ -69,7 +69,7 @@ impl Config {
             host,
             database_url,
             supabase_url: supabase_url.trim_end_matches('/').to_string(),
-            supabase_jwt_secret,
+            supabase_jwks_url,
             service_role_key,
             supabase_publishable_key,
             supabase_jwt_issuer: var("SUPABASE_JWT_ISSUER")

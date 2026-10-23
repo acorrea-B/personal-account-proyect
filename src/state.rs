@@ -7,7 +7,9 @@ use sqlx::{postgres::PgPoolOptions, PgPool};
 use crate::clients::supabase_auth::SupabaseAuthClient;
 use crate::config::Config;
 use crate::middleware::auth::SignatureVerifier;
+#[cfg(test)]
 use crate::middleware::hs256::Hs256Verifier;
+use crate::middleware::jwks::JwksVerifier;
 
 /// Dependencies shared by the handlers.
 ///
@@ -44,7 +46,10 @@ impl AppState {
             pool,
             supabase_url: config.supabase_url.clone(),
             service_role_key: config.service_role_key.clone(),
-            jwt_secret: config.supabase_jwt_secret.clone(),
+            // Only the test path signs tokens with it (test_token): the
+            // verification runs against the JWKS of the platform since the
+            // asymmetric signing-key rollout of the platform.
+            jwt_secret: String::new(),
             jwt_issuer: config.supabase_jwt_issuer.clone(),
             jwt_audience: config.supabase_jwt_audience.clone(),
             supabase_auth: SupabaseAuthClient::new(
@@ -53,10 +58,11 @@ impl AppState {
                 &config.service_role_key,
                 config.supabase_timeout,
             ),
-            signature_verifier: Arc::new(Hs256Verifier::new(
-                &config.supabase_jwt_secret,
+            signature_verifier: Arc::new(JwksVerifier::new(
+                &config.supabase_jwks_url,
                 config.issuer_to_verify(),
                 &config.supabase_jwt_audience,
+                config.supabase_timeout,
             )),
         })
     }

@@ -35,8 +35,9 @@ impl Hs256Verifier {
     }
 }
 
+#[async_trait::async_trait]
 impl SignatureVerifier for Hs256Verifier {
-    fn verify(&self, token: &str) -> Result<Claims, ApiError> {
+    async fn verify(&self, token: &str) -> Result<Claims, ApiError> {
         let inner = match decode::<Claims>(token, &self.decoding_key, &self.validation) {
             Ok(verification) => verification.claims,
             Err(err) => {
@@ -50,7 +51,7 @@ impl SignatureVerifier for Hs256Verifier {
 
 /// The library errors map to the canonical slugs without any internal
 /// technical message leaking (§13.4).
-fn map_error(error: ErrorKind) -> ApiError {
+pub(crate) fn map_error(error: ErrorKind) -> ApiError {
     match error {
         // The client can recover it by renewing: token-expired is not
         // a simple unauthorized.
@@ -61,6 +62,9 @@ fn map_error(error: ErrorKind) -> ApiError {
             detail: "The credential is invalid.".to_string(),
         },
         ErrorKind::InvalidIssuer | ErrorKind::InvalidAudience => ApiError::Unauthorized {
+            detail: "The credential is invalid.".to_string(),
+        },
+        ErrorKind::MissingRequiredClaim(_) => ApiError::Unauthorized {
             detail: "The credential is invalid for this service.".to_string(),
         },
         _ => {
@@ -122,19 +126,21 @@ mod tests {
 
     /// The issuer absent (legacy gotrue — T006 amend) skips its check: the
     /// credential without `iss` is valid for the verifier without issuer.
-    #[test]
-    fn the_verifier_without_issuer_accepts_a_token_without_iss() {
+    #[tokio::test]
+    async fn the_verifier_without_issuer_accepts_a_token_without_iss() {
         let verifier = Hs256Verifier::new("test-secret", None, "authenticated");
-        assert!(verifier.verify(&token("test-secret", None)).is_ok());
+        assert!(verifier.verify(&token("test-secret", None)).await.is_ok());
     }
 
     /// The issuer declared must coincide: the mismatch is never a leakage
     /// of the internal cause — plain unauthorized (§13.4).
-    #[test]
-    fn the_verifier_rejects_a_token_of_another_issuer() {
+    #[tokio::test]
+    async fn the_verifier_rejects_a_token_of_another_issuer() {
         let verifier = Hs256Verifier::new("test-secret", Some("supabase"), "authenticated");
         assert!(matches!(
-            verifier.verify(&token("test-secret", Some("other-tenant"))),
+            verifier
+                .verify(&token("test-secret", Some("other-tenant")))
+                .await,
             Err(ApiError::Unauthorized { .. })
         ));
     }

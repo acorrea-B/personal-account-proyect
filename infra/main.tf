@@ -87,7 +87,7 @@ resource "scaleway_function" "api" {
   # Credenciales de la función (sensitive: el plan y los logs las enmascaran).
   secret_environment_variables = {
     DATABASE_URL             = var.database_url
-    SUPABASE_JWT_SECRET      = var.supabase_jwt_secret
+    SUPABASE_JWKS_URL        = var.supabase_jwks_url
     SERVICE_ROLE_KEY         = var.service_role_key
     SUPABASE_PUBLISHABLE_KEY = var.supabase_publishable_key
   }
