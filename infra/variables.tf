@@ -1,11 +1,22 @@
-# Variables del deploy (plan §12.2). El proyecto/organización de Scaleway
-# llega por el token (SCW_SECRET_KEY): el provider lo resuelve solo.
+# Variables del deploy (plan §12.2). El project_id es explícito: con keys
+# de IAM el provider no lo resuelve desde el token (project_id is required).
+# Configuración y no credencial, PERO el repo es público y GitHub solo
+# enmascara secrets en los logs — viaja como secrets.SCW_PROJECT_ID.
 #
 # Las variables no secretas de la función vienen de los `vars` del
 # environment de GitHub y conservan los mismos defaults que tenía el
 # serverless.yml. Los secrets NUNCA pasan por aquí (plan §12.2): se adjuntan
 # fuera del pipeline como secret_environment_variables, y Terraform no los
 # declara — no los toca.
+
+variable "scw_project_id" {
+  description = "Project ID de Scaleway (consola: Project management)."
+  type        = string
+  validation {
+    condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.scw_project_id))
+    error_message = "scw_project_id debe ser un UUID."
+  }
+}
 
 variable "stage" {
   description = "Entorno lógico (solo producción por costos; staging futuro = aditivo)."

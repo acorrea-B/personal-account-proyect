@@ -173,6 +173,7 @@ jobs:
       SCW_SECRET_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_KEY }}
+      SCW_PROJECT_ID: ${{ secrets.SCW_PROJECT_ID }}
       ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
       MAX_BODY_BYTES: ${{ vars.MAX_BODY_BYTES }}
       REQUEST_TIMEOUT_SECS: ${{ vars.REQUEST_TIMEOUT_SECS }}
@@ -210,7 +211,8 @@ jobs:
           for name in ALLOWED_ORIGINS MAX_BODY_BYTES REQUEST_TIMEOUT_SECS \
             DB_MAX_CONNECTIONS RATE_LIMIT_LOGIN_PER_MIN \
             RATE_LIMIT_RESEND_PER_10MIN RATE_LIMIT_CV_WRITE_PER_MIN \
-            RATE_LIMIT_REQUEST_PER_MIN CV_MAX_BYTES CV_VERSIONS_RETENTION; do
+            RATE_LIMIT_REQUEST_PER_MIN CV_MAX_BYTES CV_VERSIONS_RETENTION \
+            SCW_PROJECT_ID; do
             VARS_ARGS+=("-var" "${name,,}=$(printenv "$name")")
           done
           set +e
