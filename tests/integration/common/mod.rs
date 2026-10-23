@@ -244,7 +244,10 @@ pub async fn admin_confirm_user(user_id: &str) {
 pub async fn db_pool() -> Option<sqlx::PgPool> {
     load_env_files();
     let url = std::env::var("DATABASE_URL").ok()?;
-    if !["localhost", "127.0.0.1"].iter().any(|host| url.contains(host)) {
+    if !["localhost", "127.0.0.1"]
+        .iter()
+        .any(|host| url.contains(host))
+    {
         tracing::warn!("the tests are skipped: DATABASE_URL is not local");
         return None;
     }

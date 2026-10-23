@@ -12,11 +12,13 @@ use uuid::Uuid;
 
 /// The profile row of a fixture user (None = still no mirror).
 async fn mirror_of(pool: &PgPool, user_id: &Uuid) -> Option<(String, String)> {
-    sqlx::query_as::<_, (String, String)>("select email, full_name from public.profiles where id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .expect("the mirror query answers")
+    sqlx::query_as::<_, (String, String)>(
+        "select email, full_name from public.profiles where id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+    .expect("the mirror query answers")
 }
 
 /// The count of the mirror rows (the 1:1 uniqueness of FR-004).
@@ -49,8 +51,14 @@ async fn the_email_confirmation_creates_the_mirror_once() {
     let (email, full_name) = mirror_of(&pool, &user_id)
         .await
         .expect("the confirmation creates the mirror (FR-004)");
-    assert_eq!(email, user.email, "the email normalized already travels in lowercase");
-    assert_eq!(full_name, "User", "the placeholder of Q1 (the API fills the rest)");
+    assert_eq!(
+        email, user.email,
+        "the email normalized already travels in lowercase"
+    );
+    assert_eq!(
+        full_name, "User",
+        "the placeholder of Q1 (the API fills the rest)"
+    );
 
     // The 1:1: a repeated confirmation never duplicates (on conflict do
     // nothing).
@@ -84,7 +92,11 @@ async fn the_email_outage_never_leaves_a_mirrorless_account() {
         Some(serde_json::json!({ "email": user.email })),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK, "FR-006: the generic always");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "FR-006: the generic always"
+    );
     let body = json_of(response).await;
     assert_eq!(
         body["message"],
@@ -96,7 +108,6 @@ async fn the_email_outage_never_leaves_a_mirrorless_account() {
     admin_confirm_user(&user.id).await;
     assert!(mirror_of(&pool, &user_id).await.is_some());
     assert_eq!(mirror_count(&pool, &user_id).await, 1);
-
 }
 
 /// The mirror of a REGISTERED user (through the APP, not the admin
