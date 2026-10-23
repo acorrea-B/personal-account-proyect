@@ -13,9 +13,12 @@ use axum::{
     Router,
 };
 
+use crate::domain::auth;
 use crate::errors::{ApiError, Problem};
 use crate::middleware::auth::AuthenticatedUser;
 use crate::state::AppState;
+
+use auth::handlers;
 
 /// Public API routes (FR-011). Anything not listed here requires a
 /// credential.
@@ -64,8 +67,13 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health))
-        .route("/v1/auth/register", post(stub_public_503))
-        .route("/v1/auth/resend-verification", post(stub_public_503))
+        // The register flow (T012, US1) — the login/refresh stay stubs until
+        // T015.
+        .route("/v1/auth/register", post(handlers::register))
+        .route(
+            "/v1/auth/resend-verification",
+            post(handlers::resend_verification),
+        )
         .route("/v1/auth/login", post(stub_public_503))
         .route("/v1/auth/refresh", post(stub_public_503))
         .merge(protected)

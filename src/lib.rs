@@ -11,6 +11,7 @@
 pub mod clients;
 pub mod config;
 pub mod db;
+pub mod domain;
 pub mod errors;
 pub mod events;
 pub mod middleware;
