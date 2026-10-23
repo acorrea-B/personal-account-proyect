@@ -120,7 +120,7 @@ jobs:
           # Rust cold build takes minutes): the smoke first waits for the
           # build state the API reports — error ends fast, with the cause
           # instead of 10 blind curls.
-          for attempt in $(seq 1 40); do
+          for attempt in $(seq 1 80); do
             STATUS=$(curl --silent --max-time 15 \
               -H "X-Auth-Token: $SCW_SECRET_KEY" \
               "https://api.scaleway.com/functions/v1beta1/regions/$REGION/functions/$FNID" \
