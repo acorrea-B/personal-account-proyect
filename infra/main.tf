@@ -81,6 +81,13 @@ resource "scaleway_function" "api" {
   memory_limit = 128
   timeout      = 30
 
+  # deploy (default false): sin él, Terraform sube el zip y la configuración
+  # pero NUNCA despliega — el apply dejaba la función con el build viejo y el
+  # deploy ocurría a mano (el Restart del dashboard, el paso manual detectado
+  # en v0.1.2..v0.1.4). Con `deploy = true` Terraform también espera el build
+  # (frío de Rust: minutos); el smoke del workflow recibe la función lista.
+  deploy       = true
+
   zip_file = "${path.module}/function.zip"
   zip_hash = filesha256("${path.module}/function.zip")
 
