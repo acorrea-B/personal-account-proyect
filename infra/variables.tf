@@ -106,10 +106,9 @@ variable "supabase_url" {
   type        = string
 }
 
-variable "supabase_jwt_secret" {
-  description = "HS256 secret that signs the JWTs of Supabase Auth."
+variable "supabase_jwks_url" {
+  description = "JWKS set of Supabase (ES256 verification; not confidential)."
   type        = string
-  sensitive   = true
 }
 
 variable "service_role_key" {

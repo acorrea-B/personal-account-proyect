@@ -40,7 +40,7 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_JWT_ISSUER: ${{ secrets.SUPABASE_JWT_ISSUER }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      SUPABASE_JWT_SECRET: ${{ secrets.SUPABASE_JWT_SECRET }}
+      SUPABASE_JWKS_URL: ${{ secrets.SUPABASE_JWKS_URL }}
       SERVICE_ROLE_KEY: ${{ secrets.SERVICE_ROLE_KEY }}
       SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
       # Non-secret configuration of the function (plan §12.2) -> terraform
@@ -97,7 +97,7 @@ jobs:
             RATE_LIMIT_RESEND_PER_10MIN RATE_LIMIT_CV_WRITE_PER_MIN \
             RATE_LIMIT_REQUEST_PER_MIN CV_MAX_BYTES CV_VERSIONS_RETENTION \
             SCW_PROJECT_ID SUPABASE_URL \
-            SUPABASE_JWT_ISSUER DATABASE_URL SUPABASE_JWT_SECRET \
+            SUPABASE_JWT_ISSUER DATABASE_URL SUPABASE_JWKS_URL \
             SERVICE_ROLE_KEY SUPABASE_PUBLISHABLE_KEY; do
             VARS_ARGS+=("-var" "${name,,}=$(printenv "$name")")
           done
