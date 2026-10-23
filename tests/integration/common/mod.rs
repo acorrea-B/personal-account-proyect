@@ -44,6 +44,28 @@ fn load_env_files() {
         }
     }
 
+    // The SAFETY of the auth URL: if it never arrived (an export that
+    // underdelivered), the DB's own host derives the local auth port
+    // (54321 — the same host of the stack serves auth and db). The
+    // derived base = the standard gateway (the CI's kong): the paths of
+    // the client carry the prefix. The local files carry the raw gotrue's
+    // base — with them, this never fires.
+    let supabase_ok = std::env::var("SUPABASE_URL")
+        .map(|value| {
+            (value.starts_with("http://") || value.starts_with("https://")) && value.trim() != ""
+        })
+        .unwrap_or(false);
+    if !supabase_ok {
+        if let Ok(db) = std::env::var("DATABASE_URL") {
+            if let Some(remainder) = db.split('@').nth(1) {
+                if let Some((host, _)) = remainder.split_once(':') {
+                    std::env::set_var("SUPABASE_URL", format!("http://{host}:54321"));
+                    eprintln!("the harness derived SUPABASE_URL={host}:54321 from the DB (the export underdelivered)");
+                }
+            }
+        }
+    }
+
     // The aliases of the platform: the CI exports the SUPABASE_* names and
     // the config of the app reads SERVICE_ROLE_KEY — the alias makes the
     // exported stack usable without touching the config (the harness is the
@@ -161,7 +183,10 @@ pub struct TestUser {
 /// Fixture via the admin API (R8): one account verificado/no verificado —
 /// returns the whole fixture (the credentials live only in the test).
 pub async fn admin_create_user(verified: bool) -> TestUser {
-    let base = std::env::var("SUPABASE_URL").expect("the guard checked it");
+    load_env_files();
+    let base = std::env::var("SUPABASE_URL").unwrap_or_else(|_| {
+        panic!("the fixture needs SUPABASE_URL: the env never got exported/loaded")
+    });
     let service = std::env::var("SERVICE_ROLE_KEY").expect("the guard checked it");
 
     // The same ending rule of the app's client — and the prefix flips: the
@@ -211,7 +236,10 @@ pub async fn admin_create_user(verified: bool) -> TestUser {
 /// T003/FR-004 fires on the update, not on the creation) — the second
 /// phase the mirror tests drive.
 pub async fn admin_confirm_user(user_id: &str) {
-    let base = std::env::var("SUPABASE_URL").expect("the guard checked it");
+    load_env_files();
+    let base = std::env::var("SUPABASE_URL").unwrap_or_else(|_| {
+        panic!("the fixture needs SUPABASE_URL: the env never got exported/loaded")
+    });
     let service = std::env::var("SERVICE_ROLE_KEY").expect("the guard checked it");
     let root = base.trim_end_matches('/');
     let root = root.strip_suffix("/auth/v1").unwrap_or(root);
@@ -270,7 +298,10 @@ pub async fn db_pool() -> Option<sqlx::PgPool> {
 /// until its flow lands (T011+).
 #[expect(dead_code)]
 pub async fn login(email: &str, password: &str) -> serde_json::Value {
-    let base = std::env::var("SUPABASE_URL").expect("the guard checked it");
+    load_env_files();
+    let base = std::env::var("SUPABASE_URL").unwrap_or_else(|_| {
+        panic!("the fixture needs SUPABASE_URL: the env never got exported/loaded")
+    });
     let service = std::env::var("SERVICE_ROLE_KEY").expect("the guard checked it");
 
     let root = base.trim_end_matches('/');
