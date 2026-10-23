@@ -36,7 +36,7 @@ Proyecto único (crate Rust): `src/`, `migrations/`, `tests/` en la raíz del re
 
 - [X] T001 Scaffold del crate Rust: `Cargo.toml` (deps: axum, tokio, tower, tower-http, sqlx, serde, serde_json, validator, thiserror, tracing, tracing-subscriber, jsonwebtoken, reqwest, uuid, time), estructura de directorios del árbol de plan.md, `src/main.rs` bootstrap mínimo (config→pool→tracing→router→serve), `src/config.rs` (struct Config con env: DATABASE_URL, SUPABASE_URL, SUPABASE_JWT_SECRET, ENV, límites R2, pool, CORS — variables secretas solo por entorno según §12.2), `src/state.rs` (struct AppState: pool + cliente auth + rate limit)
 - [X] T002 [P] Despliegue y pipelines: `infra/` con Terraform (provider `scaleway`: namespace `perfil-api-production` (sin staging por costos: el deploy ocurre solo por tag; staging futuro = aditivo), función `api` runtime `rust196`, handler `handle` en `src/lib.rs`, `zip_file`/`zip_hash` del artefacto generado por `package.sh` — `src/main.rs` excluido —, estado en Object Storage), `.github/workflows/ci.yml` (gates PR: fmt --check, clippy -D warnings, cargo-llvm-cov --fail-under-lines 90 con ratchet contra la rama base, cargo audit — D16/D17, y `terraform plan` read-only contra el workspace `production`) y `.github/workflows/deploy.yml` (solo por tag vX.Y.Z con el environment protegido vía `terraform apply`; los secrets de la función se adjuntan FUERA del pipeline y Terraform no los declara; smoke test de `/health`; el paso de migraciones — R10 — llega con T003, que introduce la función `migrate`)
-- [ ] T003 [P] Esquema inicial: `migrations/0001_schema.sql` con `profiles`, `cv_texts`, `cv_versions` y RLS deny-all exactamente como data-model.md (FKs cascade, CHECKs de longitud, índice `lower(email)`, índice `(user_id, archived_at desc)`, trigger `updated_at`), `migrations/0002_profiles_trigger.sql` (creación del espejo al confirmar email — FR-004)
+- [X] T003 [P] Esquema inicial: `migrations/0001_schema.sql` con `profiles`, `cv_texts`, `cv_versions` y RLS deny-all exactamente como data-model.md (FKs cascade, CHECKs de longitud, índice `lower(email)`, índice `(user_id, archived_at desc)`, trigger `updated_at`), `migrations/0002_profiles_trigger.sql` (creación del espejo al confirmar email — FR-004)
 
 ---
 
@@ -64,12 +64,12 @@ Proyecto único (crate Rust): `src/`, `migrations/`, `tests/` en la raíz del re
 
 ### Tests (primero, red)
 
-- [ ] T011 [US1] Tests de registro: `tests/integration/register.rs` — 201 sin tokens (FR-003) · email normalizado en respuesta y DB (FR-002: espacios/mayúsculas) · `email-exists` 409 case-insensitive · `email-malformed` 422 · `weak-password` 422 con requirements (R4) · reenvío genérico 200 (FR-006) · login pre-verificación → 403 `email-not-verified` con `can_resend: true` · perfil creado tras verificar (FR-004)
+- [X] T011 [US1] Tests de registro: `tests/integration/register.rs` — 201 sin tokens (FR-003) · email normalizado en respuesta y DB (FR-002: espacios/mayúsculas) · `email-exists` 409 case-insensitive · `email-malformed` 422 · `weak-password` 422 con requirements (R4) · reenvío genérico 200 (FR-006) · login pre-verificación → 403 `email-not-verified` con `can_resend: true` · perfil creado tras verificar (FR-004)
 
 ### Implementación
 
-- [ ] T012 [US1] DTOs y handlers de registro: `src/domain/auth/dto.rs` (structs RegisterRequest/RegisterResponse/ResendRequest con validación validator: email formato, password policy R4) y `src/domain/auth/handlers.rs` con `register` + `resend_verification` (llamadas al cliente T008, emisión `auth.registered`/`auth.verification_sent`, respuesta genérica SIEMPRE en resend — FR-005/006). IMPORTANTE: register NO crea el perfil espejo — se crea solo al confirmar email (FR-004, trigger T003 / test T013) + wiring en `src/router.rs`
-- [ ] T013 [US1] Verificación de perfil espejo: `tests/integration/profile_mirror.rs` — confirmar email dispara creación de `profiles` (email normalizado + full_name placeholder obligatorio del trigger T003) y unicidad 1:1; edge case "email service caído": cuenta creada, sin sesión, reenvío disponible (spec §5)
+- [X] T012 [US1] DTOs y handlers de registro: `src/domain/auth/dto.rs` (structs RegisterRequest/RegisterResponse/ResendRequest con validación validator: email formato, password policy R4) y `src/domain/auth/handlers.rs` con `register` + `resend_verification` (llamadas al cliente T008, emisión `auth.registered`/`auth.verification_sent`, respuesta genérica SIEMPRE en resend — FR-005/006). IMPORTANTE: register NO crea el perfil espejo — se crea solo al confirmar email (FR-004, trigger T003 / test T013) + wiring en `src/router.rs`
+- [X] T013 [US1] Verificación de perfil espejo: `tests/integration/profile_mirror.rs` — confirmar email dispara creación de `profiles` (email normalizado + full_name placeholder obligatorio del trigger T003) y unicidad 1:1; edge case "email service caído": cuenta creada, sin sesión, reenvío disponible (spec §5)
 
 **Checkpoint**: US1 funcional e independiente — MVP demostrable (quickstart §4-A parte 1).
 
@@ -83,12 +83,12 @@ Proyecto único (crate Rust): `src/`, `migrations/`, `tests/` en la raíz del re
 
 ### Tests (primero, red)
 
-- [ ] T014 [US2] Tests de login/refresh/revoke: `tests/integration/session_flow.rs` — login 200 con par de tokens · credenciales incorrectas y email inexistente → mismo problem+json `invalid-credentials` y tiempos comparables (FR-006, SC-004) · login exitoso emite `auth.login_succeeded` / fallido `auth.login_failed` con reason (D18) · refresh 200 con par NUEVO y el anterior inválido (FR-008) · reuso → 401 `refresh-token-reused` y sesión completa invalidada · refresh expirado/malformado → `invalid-refresh-token`/`bad-request` · revoke 204 y acceso posterior → 401 (FR-009)
+- [X] T014 [US2] Tests de login/refresh/revoke: `tests/integration/session_flow.rs` — login 200 con par de tokens · credenciales incorrectas y email inexistente → mismo problem+json `invalid-credentials` y tiempos comparables (FR-006, SC-004) · login exitoso emite `auth.login_succeeded` / fallido `auth.login_failed` con reason (D18) · refresh 200 con par NUEVO y el anterior inválido (FR-008) · reuso → 401 `refresh-token-reused` y sesión completa invalidada · refresh expirado/malformado → `invalid-refresh-token`/`bad-request` · revoke 204 y acceso posterior → 401 (FR-009)
 
 ### Implementación
 
-- [ ] T015 [US2] Handlers de sesión: extender `src/domain/auth/handlers.rs` con `login`, `refresh`, `revoke` (cliente T008; revocación vía admin API sobre user_id del token — FR-009; emisión `auth.session_refreshed`, `auth.refresh_rejected`, `auth.session_revoked`) y extender `src/domain/auth/dto.rs` (LoginRequest/TokenPair/RefreshRequest) + wiring `src/router.rs`
-- [ ] T016 [US2] Rate limiting de auth en acción: `tests/integration/auth_ratelimit.rs` — 6º login fallido en la ventana → 429 `rate-limited` con Retry-After (R2) · 4º resend → 429 · verificación de emisión `security.rate_limited` con `key`/`route` correctas
+- [X] T015 [US2] Handlers de sesión: extender `src/domain/auth/handlers.rs` con `login`, `refresh`, `revoke` (cliente T008; revocación vía admin API sobre user_id del token — FR-009; emisión `auth.session_refreshed`, `auth.refresh_rejected`, `auth.session_revoked`) y extender `src/domain/auth/dto.rs` (LoginRequest/TokenPair/RefreshRequest) + wiring `src/router.rs`
+- [X] T016 [US2] Rate limiting de auth en acción: `tests/integration/auth_ratelimit.rs` — 6º login fallido en la ventana → 429 `rate-limited` con Retry-After (R2) · 4º resend → 429 · verificación de emisión `security.rate_limited` con `key`/`route` correctas
 
 **Checkpoint**: US1+US2 funcionan independientes y juntas (quickstart §4-A completo).
 
@@ -102,11 +102,11 @@ Proyecto único (crate Rust): `src/`, `migrations/`, `tests/` en la raíz del re
 
 ### Tests (primero, red)
 
-- [ ] T017 [US3] Tests de perfil: `tests/integration/profile_flow.rs` — GET devuelve espejo consistente (FR-012) · PUT completo guarda y refleja (semántica put completo del contrato) · PUT vacía full_name → 422 `profile-invalid-field` con `fields.full_name` · límites de data-model (headline/location 120, bio 2000, links ≤10 con type≤40 y url http(s) ≤2048, skills ≤30 sin duplicados ≤40) · campos omitidos quedan vacíos · escritura concurrente con `If-Unmodified-Since` desactualizado → 412 `stale-version` y nada guardado (Clarifications Q2) · respuestas sin campos internos (FR-013) · emisión `profile.updated` con campos modificados
+- [X] T017 [US3] Tests de perfil: `tests/integration/profile_flow.rs` — GET devuelve espejo consistente (FR-012) · PUT completo guarda y refleja (semántica put completo del contrato) · PUT vacía full_name → 422 `profile-invalid-field` con `fields.full_name` · límites de data-model (headline/location 120, bio 2000, links ≤10 con type≤40 y url http(s) ≤2048, skills ≤30 sin duplicados ≤40) · campos omitidos quedan vacíos · escritura concurrente con `If-Unmodified-Since` desactualizado → 412 `stale-version` y nada guardado (Clarifications Q2) · respuestas sin campos internos (FR-013) · emisión `profile.updated` con campos modificados
 
 ### Implementación
 
-- [ ] T018 [US3] Dominio de perfil: `src/domain/profile/dto.rs` (ProfileResponse/UpdateProfileRequest con reglas verbatim de data-model.md: "full_name 1..200 tras trim", "headline/location ≤120", "bio ≤2000", "links ≤10, type ≤40, url http(s) ≤2048", "skills ≤30, strings ≤40, sin duplicados") y `src/domain/profile/handlers.rs` con `get_profile`/`put_profile` (repositorio T009, filtro user_id, validación estructural R3, eventos D18) + wiring `src/router.rs`
+- [X] T018 [US3] Dominio de perfil: `src/domain/profile/dto.rs` (ProfileResponse/UpdateProfileRequest con reglas verbatim de data-model.md: "full_name 1..200 tras trim", "headline/location ≤120", "bio ≤2000", "links ≤10, type ≤40, url http(s) ≤2048", "skills ≤30, strings ≤40, sin duplicados") y `src/domain/profile/handlers.rs` con `get_profile`/`put_profile` (repositorio T009, filtro user_id, validación estructural R3, eventos D18) + wiring `src/router.rs`
 
 **Checkpoint**: US1-3 funcionan (quickstart §4-B verde).
 

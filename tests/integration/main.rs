@@ -3,6 +3,8 @@
 
 mod auth_ratelimit;
 mod common;
+mod profile_flow;
 mod profile_mirror;
+mod register;
 mod session_flow;
 mod wiring;
