@@ -138,7 +138,7 @@ where
                     // R2: the write keys by user (the credential); without
                     // a valid credential the gate does not count here — the
                     // auth rejects the request.
-                    if let Some(user_id) = gate.identity(request.headers()) {
+                    if let Some(user_id) = gate.identity(request.headers()).await {
                         if let Some((_key, wait)) = gate.gate(policy, &[user_id.to_string()], true)
                         {
                             return Ok(gate.blocked(
@@ -276,14 +276,14 @@ impl Gate {
 
     /// The identity certified by the Authorization header (None without a
     /// valid credential — the gate does not count here: the auth rejects).
-    fn identity(&self, headers: &axum::http::HeaderMap) -> Option<Uuid> {
+    async fn identity(&self, headers: &axum::http::HeaderMap) -> Option<Uuid> {
         let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split_once(' '))
             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
             .map(|(_, token)| token.trim())?;
-        let claims = self.verifier.verify(token).ok()?;
+        let claims = self.verifier.verify(token).await.ok()?;
         claims.sub.parse::<Uuid>().ok()
     }
 }

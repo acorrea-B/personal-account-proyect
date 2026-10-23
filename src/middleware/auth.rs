@@ -19,9 +19,11 @@ use crate::errors::{ApiError, Problem};
 use crate::state::AppState;
 
 /// Verifies the signature and the claims of a credential of use (R1).
+/// Async: the JWKS verifier can refresh the key set on an unknown kid.
+#[async_trait::async_trait]
 pub trait SignatureVerifier: Send + Sync {
     /// Validates the token and resolves the identity it certifies.
-    fn verify(&self, token: &str) -> Result<Claims, ApiError>;
+    async fn verify(&self, token: &str) -> Result<Claims, ApiError>;
 }
 
 /// Claims of the credential of use after the library validation: `sub` is
@@ -56,6 +58,7 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
         let claims = state
             .signature_verifier
             .verify(&token)
+            .await
             .map_err(|api_error| Problem::new(api_error).on(request_path(parts)))?;
 
         claims
