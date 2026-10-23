@@ -110,10 +110,13 @@ async fn the_email_outage_never_leaves_a_mirrorless_account() {
     assert_eq!(mirror_count(&pool, &user_id).await, 1);
 }
 
-/// The mirror of a REGISTERED user (through the APP, not the admin
-/// fixture): the register of the app + the confirmation = the same mirror
-/// contract — the trigger does not care who created the account, and the
-/// register itself must NOT mirror (FR-004: it lands with the email).
+/// The mirror of a registered account (through the APP, not the admin
+/// fixture), FR-004: the mirror lands at the INSTANT OF THE CONFIRMATION —
+/// whichever it was. The flavor decides the instant: the autoconfirm
+/// stacks (the CI's local — the era without email confirmations) confirm
+/// AT THE SIGNUP and their mirror already exists in the 201; the
+/// email-verification flow leaves it empty until the admin confirmation.
+/// BOTH = the same contract (one mirror, Q1's placeholder, 1:1).
 #[tokio::test]
 async fn the_confirmation_of_a_registered_account_mirrors_the_same() {
     let Some(pool) = db_pool().await else {
@@ -133,7 +136,11 @@ async fn the_confirmation_of_a_registered_account_mirrors_the_same() {
         })),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "the register of the app (the flow of T012)"
+    );
     let body = json_of(response).await;
     let registered_id: Uuid = body["user"]["id"]
         .as_str()
@@ -141,18 +148,41 @@ async fn the_confirmation_of_a_registered_account_mirrors_the_same() {
         .parse()
         .expect("a UUID");
 
-    // The register does NOT create the mirror (FR-004 — it lands with
-    // the email): the empty check uses the id the 201 returned.
-    assert!(
-        mirror_of(&pool, &registered_id).await.is_none(),
-        "the register does NOT mirror (FR-004)"
-    );
+    let (expected_email, mirror) = {
+        let mirror = mirror_of(&pool, &registered_id).await;
+        (email.to_lowercase(), mirror)
+    };
 
-    admin_confirm_user(&registered_id.to_string()).await;
-    let (email, full_name) = mirror_of(&pool, &registered_id)
-        .await
-        .expect("the mirror lands on the confirmation");
-    assert_eq!(email, email.to_lowercase(), "FR-002 normalized");
-    assert_eq!(full_name, "User", "the placeholder of Q1");
-    assert_eq!(mirror_count(&pool, &registered_id).await, 1, "the 1:1");
+    match mirror {
+        // The email-verification flavor: the mirror still owes the
+        // confirmation — it lands when the UPDATE arrives.
+        None => {
+            admin_confirm_user(&registered_id.to_string()).await;
+            let (email, full_name) = mirror_of(&pool, &registered_id)
+                .await
+                .expect("the mirror lands on the confirmation");
+            assert!(email.chars().all(|c| c == c.to_ascii_lowercase()), "FR-002");
+            assert_eq!(full_name, "User", "the placeholder of Q1");
+        }
+        // The autoconfirm flavor: the mirror of the confirmed-at-signup
+        // account = the SAME contract's row.
+        Some((existing_email, existing_full_name)) => {
+            assert!(
+                existing_email.chars().all(|c| c == c.to_ascii_lowercase()),
+                "FR-002"
+            );
+            assert_eq!(existing_full_name, "User", "the placeholder of Q1");
+            assert_eq!(
+                body["user"]["verified"], true,
+                "the flavor that mirrors at signup says so honest in the 201"
+            );
+        }
+    }
+    // The email's normalization of the register (FR-002) held either way:
+    let _ = expected_email;
+    assert_eq!(
+        mirror_count(&pool, &registered_id).await,
+        1,
+        "the 1:1 always"
+    );
 }

@@ -92,9 +92,16 @@ impl SupabaseAuthClient {
         }
     }
 
-    /// `POST /auth/v1/signup` (FR-003): resolves the id of the user; NO
-    /// session travels here — the tokens never leave the session flow.
-    pub async fn signup(&self, email: &str, password: &str) -> Result<Uuid, ApiError> {
+    /// `POST /auth/v1/signup` (FR-003): resolves the id of the user and
+    /// the REAL verification state — NO session/credentials travel out of
+    /// here (the tokens never leave the session flow; the FR-003 gate is
+    /// the handlers').
+    ///
+    /// The two shapes of goTruth respond: the verification flow (the
+    /// account waits the email — the top-level `id`) and the AUTOCONFIRM
+    /// of the stacks without confirmations (the full session with the
+    /// `user` object inside).
+    pub async fn signup(&self, email: &str, password: &str) -> Result<(Uuid, bool), ApiError> {
         let response = self
             .request(
                 reqwest::Method::POST,
@@ -104,10 +111,17 @@ impl SupabaseAuthClient {
             )
             .await?;
 
-        response["id"]
+        let user = &response["user"];
+        let id = response["id"]
             .as_str()
-            .and_then(|id| Uuid::parse_str(id).ok())
-            .ok_or(ApiError::Internal)
+            .or_else(|| user["id"].as_str())
+            .and_then(|id| Uuid::parse_str(id).ok());
+        let verified = user["email_confirmed_at"].as_str().is_some()
+            || user["confirmed_at"].as_str().is_some();
+        match id {
+            Some(id) => Ok((id, verified)),
+            None => Err(ApiError::Internal),
+        }
     }
 
     /// `POST /auth/v1/token?grant_type=password` (FR-001): login accepted
@@ -278,7 +292,7 @@ impl SupabaseAuthClient {
 
                     // 4xx: the body carries {code, error_code, msg}.
                     let document: Value = serde_json::from_slice(&bytes).unwrap_or_default();
-                    return Err(auth_error_of(status, &document));
+                    return Err(auth_error_of(status, &document, path));
                 }
             }
         }
@@ -334,15 +348,19 @@ fn session_of(response: &Value) -> Result<Session, ApiError> {
 /// (contracts/errors.md). The unknown codes keep the generic internal
 /// detail and their code stays in the log only (§13.4).
 ///
+/// The ROUTE decides the slug of the codes that mean different things per
+/// flow (`validation_failed`: the EMAIL's malformed at the register, the
+/// credential's bad-request at the grant of the tokens).
+///
 /// Two dialects of goTrue travel here: the MODERN shape
 /// (`code`/`error_code`/`msg`) and the LEGACY one of the older stacks
 /// (`error`/`error_description` — e.g. `invalid_grant` + "Invalid login
 /// credentials" for the failed login, `Invalid Refresh Token: …` for the
 /// renewal) — one vocabulary to the catalogue either way.
-fn auth_error_of(status: StatusCode, document: &Value) -> ApiError {
+fn auth_error_of(status: StatusCode, document: &Value, path: &str) -> ApiError {
     let code = document["error_code"].as_str().unwrap_or_default();
     if !code.is_empty() {
-        return modern_error_of(code, status, document);
+        return modern_error_of(code, status, path);
     }
     let error = document["error"].as_str().unwrap_or_default();
     if !error.is_empty() {
@@ -357,7 +375,7 @@ fn auth_error_of(status: StatusCode, document: &Value) -> ApiError {
 }
 
 /// The modern shape (T008).
-fn modern_error_of(code: &str, status: StatusCode, _document: &Value) -> ApiError {
+fn modern_error_of(code: &str, status: StatusCode, path: &str) -> ApiError {
     match code {
         "invalid_credentials" => ApiError::InvalidCredentials,
         "email_not_confirmed" => ApiError::EmailNotVerified,
@@ -367,6 +385,9 @@ fn modern_error_of(code: &str, status: StatusCode, _document: &Value) -> ApiErro
         },
         "refresh_token_already_used" => ApiError::RefreshTokenReused,
         "weak_password" => ApiError::WeakPassword,
+        "validation_failed" if path.contains("/token?") => ApiError::BadRequest {
+            detail: "The credential of renewal is not the shape of one.".to_string(),
+        },
         "email_address_invalid" | "validation_failed" => ApiError::EmailMalformed,
         "over_request_rate_limit" | "over_email_send_rate_limit" => ApiError::RateLimited {
             retry_after_seconds: 60,
@@ -530,11 +551,40 @@ mod tests {
         })
         .await;
 
-        let id = client(&base)
+        let (id, verified) = client(&base)
             .signup("user@mail.com", "Passw0rd1")
             .await
             .unwrap();
         assert_eq!(id.to_string(), "c0a8e1f2-33b4-4c5d-8e9f-a0b1c2d3e4f5");
+        assert!(!verified, "the plain shape carries no confirmation");
+    }
+
+    /// The AUTOCONFIRM's shape of the signup (the full session — the era
+    /// without confirmations): the id comes from the user and the
+    /// verification is real.
+    #[tokio::test]
+    async fn the_signup_of_the_autoconfirmed_shape_parses_the_user() {
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::OK,
+                serde_json::json!({
+                    "access_token": "at", "refresh_token": "rt", "expires_in": 3600,
+                    "user": {
+                        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+                        "email": "user@mail.com",
+                        "email_confirmed_at": "2026-01-01T00:00:00Z",
+                        "created_at": "2026-01-01T00:00:00Z"
+                    }
+                }),
+            )
+        })
+        .await;
+        let (id, verified) = client(&base)
+            .signup("user@mail.com", "Passw0rd1")
+            .await
+            .unwrap();
+        assert_eq!(id.to_string(), "3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+        assert!(verified, "the autoconfirm confirms at the signup");
     }
 
     /// `invalid_credentials` → the same slug, identical (FR-006);
