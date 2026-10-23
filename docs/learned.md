@@ -1,239 +1,239 @@
-# Aprendizajes (learned log)
+# Learned log
 
-> **Propósito del archivo**: bitácora acumulativa de aprendizajes técnicos del
-> proyecto, con formato estable para compilar entre repos — los repos sucesivos
-> que se creen con este objetivo llevan su `learned.md` y el compilado los
-> recorre leyendo los encabezados uniformes. Cada entrada: **lo que pasó**,
-> **la regla** que evita repetirlo, y **la evidencia** (run/commit/dato).
+> **File purpose**: an accumulating log of technical lessons, in a stable
+> format ready for cross-repo compilation — successive repos built with this
+> learning objective carry their own `learned.md`, and the compilation walks
+> them reading the uniform headers. Every entry: **what happened**, **the
+> rule** that avoids repeating it, and the **evidence** (run/commit/number).
 >
-> Convención de entrada: `## [topic] — título` + `**Fecha**: ...` + cuerpo con
-> `Regla:` y `Evidencia:`. Temas estables (palabras de compuesto): `scaleway`,
-> `supabase`, `ci`, `rust`, `operacion`.
+> Entry convention: `## [topic] — title` + `**Date**: ...` + body with
+> `Rule:` and `Evidence:`. Stable topics (compilation keys): `scaleway`,
+> `supabase`, `ci`, `rust`, `operation`.
 
 ---
 
-## [scaleway] scaleway_function no despliega sin `deploy = true`
+## [scaleway] scaleway_function does not deploy without `deploy = true`
 
-**Fecha**: 2026-10-22/23 (v0.1.2–v0.1.5)
+**Date**: 2026-10-22/23 (v0.1.2–v0.1.5)
 
-El atributo `deploy` de `scaleway_function` (provider `scaleway`) defaultea a
-`false`: el `apply` sube el zip y actualiza la configuración, pero el **build y
-el swap solo ocurren con el Restart manual del dashboard**. Con `deploy = true`
-Terraform también lanza el deploy y espera el build.
+The `deploy` attribute of `scaleway_function` (the `scaleway` provider)
+defaults to `false`: the `apply` uploads the zip and updates the
+configuration, but the **build and the swap only happen with the manual
+Restart of the dashboard**. With `deploy = true`, Terraform also launches the
+deployment and waits for the build.
 
-- **Regla**: en todo proyecto Scaleway Functions + Terraform, declarar
-  `deploy = true` desde el primer día. El apply tardará el build — es el costo
-  correcto, no un cuelgue.
-- **Evidencia**: deploys v0.1.2..v0.1.4 con el paso manual fantasma; el run 13
-  (v0.1.5) midió Apply en **7 min** con el `deploy = true`.
+- **Rule**: in every Scaleway Functions + Terraform project, declare
+  `deploy = true` from day one. The apply will take the build — that is the
+  correct cost, not a hang.
+- **Evidence**: deploys v0.1.2..v0.1.4 with the ghost manual step; run 13
+  (v0.1.5) measured the Apply at **7 min** with `deploy = true`.
 
-## [scaleway] El build frío de Rust tarda >10 min — sondear el estado del build en el CI falla y cobra
+## [scaleway] The cold Rust build takes >10 min — polling the build state in the CI fails and bills
 
-**Fecha**: 2026-10-22/23
+**Date**: 2026-10-22/23
 
-El sondeo del smoke contra el estado del build (40×15s) se agotó en v0.1.2 y
-v0.1.3 con deploys correctos — firma del run de ~12 min exactos; subir a 80
-intentos solo lo demoró más (v0.1.4 pagó 20 min). Con `deploy = true` el sondeo
-quedó sobrante: el apply ya espera.
+The smoke's build-state polling (40×15s) ran out on v0.1.2 and v0.1.3 with
+correct deploys — the signature of a run of exactly ~12 min; raising to 80
+attempts only made it slower (v0.1.4 paid 20 min). With `deploy = true` the
+polling became redundant: the apply already waits.
 
-- **Regla**: **nunca sondear el estado del build en el CI**. La espera del
-  provider (`deploy = true`) corre dentro del apply que ya se paga; la espera
-  en el CI **cobra dos veces**: runner-minutes facturables E invocaciones
-  facturables de la función (cada poll de la API y cada golpe de `/health`),
-  amplificado cada vez que el job se re-corré. El chequeo post-deploy queda
-  como una sola compuerta HTTP con margen de SEGUNDOS.
-- **Evidencia**: run 10 (12 min), run 11 (12 min), run 12 (20.5 min); el run 14
-  (v0.1.6): Apply 11.9 min + **Smoke de 12 segundos** — run verde completo.
-- **Costo medido del smoke sobrande (v0.1.5)**: el run 12 gastó ~20.5 min de
-  runner + ~86 invocaciones de producción en sondear un build correcto.
+- **Rule**: **never poll the build state in the CI**. The provider's wait
+  (`deploy = true`) runs inside the apply that is paid anyway; the wait in
+  the CI **bills twice**: billable runner-minutes AND billable function
+  invocations (every API poll and every `/health` hit), amplified every time
+  the job re-runs. The post-deploy check remains a single HTTP gate with
+  margins of SECONDS.
+- **Evidence**: run 10 (12 min), run 11 (12 min), run 12 (20.5 min); run 14
+  (v0.1.6): Apply 11.9 min + **Smoke of 12 seconds** — the run fully green.
+- **Measured cost of the redundant smoke (v0.1.5)**: run 12 spent ~20.5 min
+  of runner + ~86 production invocations polling a correct build.
 
-## [scaleway] Logs y métricas del runtime rust196 vs AWS Lambda
+## [scaleway] rust196 runtimes: logs and metrics vs AWS Lambda
 
-**Fecha**: 2026-10-22/23 — comparación del operador
+**Date**: 2026-10-22/23 — the operator's comparison
 
-Quejas concretas del operador contra Scaleway Functions, siendo AWS Lambda el
-referente:
+Concrete complaints against Scaleway Functions, with AWS Lambda as the
+reference:
 
-1. **El log del evento no va acompañado de su costo**: la línea del wrapper
-   (`Function triggered: /path`) no incluye cuánto tiempo tomó el evento ni
-   cuántos recursos consumió. En Lambda, cada invocación loggea `REPORT` con
-   request-id, **duration**, **billed duration**, **memory used** — todo en la
-   misma corriente.
-2. **Las métricas van por aparte**: la interfaz de métricas (Cockpit) es una
-   consola distinta de la de logs — pasos adicionales vs Lambda (donde
-   CloudWatch mezcla logs y métricas del request en un mismo lugar).
-3. **Las métricas tampoco miden el tiempo de ejecución del evento**: solo
-   muestran **CPU y memoria** — para correlacionar latencia hay que inferirla
-   (o cronometrar por fuera).
-4. **Primera medición real de la función** (configuración base actual, min_scale 0 /
-   max_scale 1 / 128 MiB): el evento típico consumió **~48 MiB de memoria y
-   ~20% de CPU** — la respuesta del `/health` (0.5-0.7 s de latencia medida
-   desde fuera, en gran parte cold-start del contenedor).
+1. **The event log carries none of its cost**: the wrapper's line
+   (`Function triggered: /path`) includes neither how long the event took nor
+   how many resources it consumed. In Lambda, every invocation logs a `REPORT`
+   with request-id, **duration**, **billed duration**, **memory used** — all
+   in the same stream.
+2. **Metrics live in a separate interface**: the metrics console (Cockpit) is
+   a different surface from the logs — extra steps versus Lambda (where
+   CloudWatch mixes the request's logs and metrics in one place).
+3. **The metrics do not measure the event's execution time either**: they show
+   **CPU and memory only** — correlating latency requires inferring it (or
+   timing it externally).
+4. **First real measurement of the function** (the current base config,
+   min_scale 0 / max_scale 1 / 128 MiB): a typical event consumed **~48 MiB of
+   memory and ~20% of CPU** — the `/health` answer (0.5-0.7 s of latency
+   measured from outside, largely the container's cold start).
 
-- **Regla**: la app debe auto-instrumentar lo que la plataforma no da: la
-  capa `TraceLayer` (latencia por request), los eventos D18 con `ts` propio y
-  el log de arranque de BD (PR-1) son el sustituto del `REPORT` de Lambda.
-  Presupuesto la memoria del crate con la medición (48 MiB / 128 MiB deja
-  ~3× de margen — vigilado cuando crezcan las rutas).
-- **Evidencia**: captura de Functions Logs con solo líneas del wrapper; la
-  medición de 48 MiB / 20% CPU en el panel del operador (2026-10-22).
+- **Rule**: the app must self-instrument what the platform does not give: the
+  `TraceLayer` (latency per request), the D18 events with their own `ts` and
+  the startup DB log (PR-1) stand in for Lambda's `REPORT`. Budget the crate's
+  memory with the measurement (48 MiB / 128 MiB leaves a ~3× headroom — watch
+  it as the routes grow).
+- **Evidence**: the Functions Logs capture with only wrapper lines; the
+  48 MiB / 20% CPU measurement on the operator's panel (2026-10-22).
 
-## [scaleway] La instalación de `try_init` jamás se traga en silencio (y los logs de la app funcionan — era la latencia del shipper)
+## [scaleway] `try_init` installs are never swallowed (and the app logs worked — it was the shipper's latency)
 
-**Fecha**: 2026-10-22/23
+**Date**: 2026-10-22/23
 
-"No hay logs de la app" resultó ser **latencia de sincronización del
-shipper de logs de la plataforma**: el registro con timestamp propio aparecía
-minutos tarde en la vista. El subscriber de tracing funciona (JSON en stdout
-del runtime legacy y stderr del fix v0.1.4 — ambos canales capturados; el
-revert de v0.1.6 lo devolvió a stdout). El wrapper NO bloquea al subscriber
-propio de la app.
+"No app logs" turned out to be the **log shipper's sync latency of the
+platform**: lines with their own timestamp appeared minutes late in the view.
+The tracing subscriber works fine (JSON on stdout in the legacy runtime and
+stderr in the v0.1.4 fix — both channels captured; v0.1.6's revert returned it
+to stdout). The wrapper does NOT block the app's own subscriber.
 
-- **Regla**: ante un "no hay logs", **el timestamp del log es la verdad, no la
-  hora de vista** — esperar la ingesta (minutos) y compilar por
-  instancia/deployment antes de atribuirlo. Y la regla Rust transversal: el
-  fallo de `try_init` del subscriber NUNCA queda en `let _ =` — eprintln con
-  el motivo (una sola vez lo detecta: o el conflicto del subscriber, o la
-  salida del canal).
-- **Evidencia**: la línea JSON `tower_http::trace::on_failure` ERROR con
-  timestamp `16:24:31Z` proveniente del build viejo; el log de arranque de BD
-  (`latency_ms: 161`) visible tras el sync (2026-10-23).
+- **Rule**: facing a "no logs", **the log's timestamp is the truth, not the
+  time of view** — wait for the ingestion (minutes) and filter by
+  instance/deployment before blaming anything. And the cross-cutting Rust
+  rule: the subscriber's `try_init` failure is NEVER swallowed by `let _ =` —
+  eprintln with the reason (it discriminates in one deploy: a subscriber
+  conflict, or the surviving channel).
+- **Evidence**: the JSON `tower_http::trace::on_failure` ERROR line with
+  timestamp `16:24:31Z` coming from the OLD build; the startup DB log
+  (`latency_ms: 161`) visible after the sync (2026-10-23).
 
-## [scaleway] Ventana 5xx propia del apply-secrets→build-nuevo
+## [scaleway] The apply-secrets→new-build 5xx window
 
-**Fecha**: 2026-10-22
+**Date**: 2026-10-22
 
-El apply intercambia secrets/env ANTES de que el build nuevo esté listo: el
-build viejo sigue sirviendo con la config que ya cambió → 500 en cada
-cold-start hasta el swap (el v0.1.3: el build viejo perdió `SUPABASE_JWT_SECRET`
-y respondió 500 por toda la ventana).
+The apply swaps secrets/env BEFORE the new build is ready: the old build keeps
+serving with the configuration that already changed → 500 on every cold start
+until the swap (v0.1.3: the old build lost `SUPABASE_JWT_SECRET` and answered
+500 across the whole window).
 
-- **Regla**: durante un deploy, un 5xx "de configuración" en producción puede
-  ser DEL BUILD VIEJO — correlacionar deployment-id antes de culpar al código
-  nuevo (la ventana termina cuando el swap llega, con `deploy = true` el apply
-  la espera).
-- **Evidencia**: la ventana de 500 de v0.1.3 (16:39–16:55 aprox, deployment-00008).
+- **Rule**: during a deploy, a configuration-like 5xx in production may come
+  FROM THE OLD BUILD — correlate the deployment id before blaming the new
+  code (the window ends when the swap lands; with `deploy = true` the apply
+  waits for it).
+- **Evidence**: v0.1.3's 500 window (~16:39–16:55, deployment-00008).
 
-## [supabase] JWKS/ES256: nueva era de claves asimétricas (post-octubre-2025)
+## [supabase] JWKS/ES256: the asymmetric-key era (post-october-2025)
 
-**Fecha**: 2026-10-22 (T006-amend, v0.1.3)
+**Date**: 2026-10-22 (T006 amend, v0.1.3)
 
-Los proyectos Supabase nuevos firman con **claves asimétricas (ES256)**: el
-legacy `SUPABASE_JWT_SECRET` ya no existe — la credencial del proyecto es el
-**JWKS URL** (público). El verificador (`JwksVerifier`) resuelve la clave por
-`kid`, cachea el set y re-fetchea ante un kid desconocido (rotación sin
-re-deploy); un fallo de fetch es 503 (dependencia), nunca 401.
+New Supabase projects sign with **asymmetric keys (ES256)**: the legacy
+`SUPABASE_JWT_SECRET` no longer exists — the project's credential is the
+**JWKS URL** (public). The verifier (`JwksVerifier`) resolves the key by
+`kid`, caches the set, and re-fetches on an unknown kid (rotation without
+re-deploy); a fetch failure is 503 (dependency), never 401.
 
-- **Regla**: la firma de credenciales de Supabase nunca se asume HS256; el
-  JWKS endpoint del proyecto `GET /auth/v1/.well-known/jwks.json` es la
-  primera prueba del proyecto. Y en local: el goTrue legacy **no emite
-  `issuer`** y su JWKS sale con `keys: []` (no publica claves simétricas) —
-  los tests de flujos protegidos en local usan el verificador HS256 del
-  `AppState::for_tests()`, el CI el JWKS real del cloud.
-- **Evidencia**: el JWKS de produccion: 1 clave EC P-256/ES256 validada en
+- **Rule**: Supabase credential signing is never assumed HS256; the project's
+  `GET /auth/v1/.well-known/jwks.json` is the project's first probe. And
+  locally: the legacy goTrue **does not emit `issuer`** and its JWKS answers
+  with `keys: []` (symmetric keys never publish) — the locally-tested
+  protected flows use the HS256 verifier of `AppState::for_tests()`; the CI
+  the cloud's real JWKS.
+- **Evidence**: the JWKS of production: 1 key of EC P-256/ES256 validated via
   curl (v0.1.3, 2026-10-23).
 
-## [supabase] Pooler modo sesión vs transacción en serverless
+## [supabase] Session-pooler vs transaction-pooler under serverless
 
-**Fecha**: 2026-10-22/23
+**Date**: 2026-10-22/23
 
-La red sin IPv6 no conecta directa a Supabase: el pooler es la única vía —
-`aws-1-eu-central-1.pooler.supabase.com`. Puerto **5432 = modo sesión** (cada
-conexión del pool mantiene una sesión pegada — compite contra el techo de
-conexiones del proyecto), puerto **6543 = modo transacción** (libera por
-transacción — el correcto para una función con pool interno que abre/cierra).
+The IPv6-less network cannot connect directly to Supabase: the pooler is the
+only route — `aws-1-eu-central-1.pooler.supabase.com`. Port **5432 = session
+mode** (every connection of the pool holds a pinned session — it competes
+against the project's connection cap); port **6543 = transaction mode**
+(releases per transaction — the correct one for a function with an internal
+pool that opens and closes).
 
-- **Regla**: migraciones (CLI, una conexión a la vez) → 5432; **la API →
-  6543** (secret de producción, cambio de una línea — pendiente de ejecutar al
-  cierre de la fase US1). La escala de las funciones NUNCA debe competir contra
-  el límite de conexiones: con instancias que abren/cierran, el modo sesión
-  muerde el techo.
-- **Evidencia**: el `.env` del operador (5432 en curso) + el comentario propio
-  señalando 6543 para la API; TCP probe OK.
+- **Rule**: migrations (the CLI, one connection at a time) → 5432; **the API →
+  6543** (the production secret, a one-line change — pending to execute at the
+  closing of the US1 phase). The functions' scale NEVER competes against the
+  connection cap: with instances opening/closing, session mode bites the cap.
+- **Evidence**: the operator's `.env` (5432 in effect) + their own comment
+  pointing 6543 for the API; TCP probe OK.
 
-## [ci] La cobertura se mide ANTES del push y el camino async se cubre en el primer PR
+## [ci] Coverage is measured BEFORE the push and the async path is covered in the first PR
 
-**Fecha**: 2026-10-22 (ratchet 92.79/93.66 y T012 en 0/105)
+**Date**: 2026-10-22 (ratchet 92.79/93.66 and T012 at 0/105)
 
-Dos fallos de cobertura, dos reglas:
+Two coverage failures, two rules:
 
-1. **T012 inicial**: el handler nuevo quedó **0/105 cubierto** porque su
-   corredor dependía de una tarea posterior (T011) — el CI ratchet falla. El
-   arreglo: unit tests del handler contra un fake in-process (axum — es
-   dependencia de prod; sin dev-deps de mock http) y las pruebas que caben
-   **ahora**.
-2. El ratchet del PR del JWKS (92.79% vs base 93.66%): los tests cubrían solo
-   el núcleo fácil; el wiring de producción usa otra implementación que la del
-   estado de test — lo no cubierto es la frontera entre ambos.
+1. **T012 initial**: the new handler landed **0/105 covered** because its
+   runner depended on a later task (T011) — the CI ratchet fails. The fix:
+   unit tests of the handler against an in-process fake (axum — a prod
+   dependency; no mock-http dev-deps) and the tests that fit **now**.
+2. The JWKS PR's ratchet (92.79% vs base 93.66%): the tests covered only the
+   easy core; the production wiring uses another implementation than the test
+   state's — the uncovered part is exactly the border between them.
 
-- **Regla del operador**: el checklist pre-push es fmt → clippy → tests →
-  **`cargo llvm-cov` con las exclusiones del CI** — el push no es el momento
-  de descubrir cobertura. Y si una porción depende de una tarea posterior: se
-  declara en el PR, no se descubre en el CI.
-- **Evidencia**: handlers.rs 0%→98.4% tras las pruebas con el fake (la delta
-  recuperó el ratchet con margen: +206 líneas cubiertas).
+- **Operator's rule**: the pre-push checklist is fmt → clippy → tests →
+  **`cargo llvm-cov` with the CI's exclusions** — the push is not the moment
+  to discover coverage. And if a portion depends on a later task: declare it
+  in the PR, do not let the CI discover it.
+- **Evidence**: handlers.rs 0%→98.4% after the fake-backed tests (the delta
+  recovered the ratchet with margin: +206 covered lines).
 
-## [ci] Los tests de integración corrieron muertos: el orden del merge de dotenv
+## [ci] The integration tests ran dead: the dotenv merge order
 
-**Fecha**: 2026-10-23 (harness T010)
+**Date**: 2026-10-23 (harness T010)
 
-`load_env_files` cargaba `.env` primero con set-if-absent: el
-`DATABASE_URL` **cloud** del `.env` ganaba y la guardia de localidad
-fallaba — **todos los tests de integración se salteaban en silencio**, aquí y
-en el CI (que además exporta `SUPABASE_SERVICE_ROLE_KEY`, no `SERVICE_ROLE_KEY`).
-Toda la capa de integración (T010/T011+) "pasaba" sin correr.
+`load_env_files` loaded `.env` first with set-if-absent: the `.env`'s **cloud**
+`DATABASE_URL` won and the locality guard failed — **every integration test
+skipped silently**, locally and in the CI (which does not export
+`SERVICE_ROLE_KEY` anyway). The whole integration tier (T010/T011+) "passed"
+without running.
 
-- **Regla**: el merge de dotenv resuelve **por última escritura** (el stack de
-  test gana) y el proceso conserva la última palabra; los alias (`SERVICE_ROLE_KEY`
-  ← `SUPABASE_SERVICE_ROLE_KEY`) viven en el harness, no en la config de la app.
-  Un test que se saltea silenciosamente NO es un test verde — el resultado
-  "2 passed en 0.00s" era la trampa.
-- **Evidencia**: la guardia corriendo de verdad contra el stack `pap` local:
-  2/2 integration ok en 0.05s (2026-10-23).
+- **Rule**: the dotenv merge resolves **by last write** (the test stack wins)
+  and the process environment keeps the last word; the aliases
+  (`SERVICE_ROLE_KEY` ← `SUPABASE_SERVICE_ROLE_KEY`) live in the harness, not
+  in the app's config. A silently skipped test is NOT a green test — the
+  "2 passed in 0.00s" was the trap.
+- **Evidence**: the guard really running against the local `pap` stack: 2/2
+  integration ok in 0.05s (2026-10-23).
 
-## [rust/axum] El deny-by-default vive en el EXTRACTOR, no en el router
+## [rust/axum] Deny-by-default lives in the EXTRACTOR, not in the router
 
-**Fecha**: 2026-10-23
+**Date**: 2026-10-23
 
-En axum, un handler sin el extractor de autenticación es **anónimo aunque su
-ruta viva en un router anidado "protegido"**: `/v1/cv/versions/{id}` extraía
-solo `Path` y un anónimo pasaba a 503 donde FR-011 exige 401. El wiring test
-lo delató.
+In axum, a handler without the authentication extractor is **anonymous even
+when its route hangs in a nested "protected" router**: `/v1/cv/versions/{id}`
+extracted only `Path` and an anonymous request passed with 503 where FR-011
+demands 401. The wiring test caught it.
 
-- **Regla**: todo handler protegido lleva `AuthenticatedUser` como PRIMER
-  extractor — ninguna convención de router protege nada. La prueba del wiring
-  (cada ruta protegida anónima → 401) queda permanente.
-- **Evidencia**: `wiring::the_protected_routes_require_a_credential` fallando
-  por la ruta de versión; arreglado con el extractor en `stub_version_503`.
+- **Rule**: every protected handler carries `AuthenticatedUser` as the FIRST
+  extractor — no router convention protects anything. The wiring proof (every
+  protected route anonymous → 401) remains permanent.
+- **Evidence**: `wiring::the_protected_routes_require_a_credential` failing
+  for the version route; fixed with the extractor in `stub_version_503`.
 
-## [operacion] Las estabilizaciones van en las PRIMERAS tareas, no en la cola de polish
+## [operation] Stabilization tasks go FIRST, not in the polish tail
 
-**Fecha**: 2026-10-23 — regla del operador
+**Date**: 2026-10-23 — the operator's rule
 
-Las tareas de operación/observabilidad (prueba de DB en el arranque, deploy
-automatizado, smoke sin sondeo, logging verificado) **pertenecen a las
-primeras tareas del plan** — su valor y prioridad se cobra antes — para que el
-desarrollo de las tareas complejas sea más preciso.
+The operation/observability tasks (the startup DB proof, the automated
+deploy, the polling-free smoke, the verified logging) **belong to the FIRST
+tasks of the plan** — their value and priority pay up front — so the
+development of the complex tasks stays precise.
 
-- **Regla**: al armar el orden de tareas de cualquier feature/proyecto:
-  estabilidad/observabilidad adelantada. Y los hallazgos de plataforma que
-  aparezcan a mitad del ciclo se absorben como tareas tempranas del **ciclo en
-  curso** — nunca a una cola final de "polish".
-- **Evidencia**: esta sesión — las "tareas pequeñas" (deploy=true, smoke slim,
-  log de arranque, diagnóstico del shipper) dieron más valor operativo que
-  cualquier handler; el ciclo US1/T012 arrancó sobre una plataforma estabilizada.
+- **Rule**: when ordering the tasks of any feature/project: stability and
+  observability land early. And platform findings appearing mid-cycle (like
+  Scaleway's) get absorbed as early tasks of the **current cycle** — never
+  into a final "polish" tail.
+- **Evidence**: this session — the "small tasks" (deploy=true, smoke slim,
+  the startup log, the shipper's diagnosis) delivered more operational value
+  than any handler; the US1/T012 cycle started on a stabilized platform.
 
-## [operacion] Los PRs se apilan y la cobertura viaja con su feature
+## [operation] PRs stack and coverage travels with its feature
 
-**Fecha**: 2026-10-22/23
+**Date**: 2026-10-22/23
 
-Flujo que este proyecto ya valida: rama por tarea, ≤6 archivos, squash/merge
-con revisión manual entre PRs; el fix apilado se rebase sobre la rama que
-reportó (el rustsec rebaseado sobre la rama del PR-1 que reportó el aviso);
-la cobertura del handler nuevo viaja en el MISMO PR que la implementa.
+The flow this project already validates: a branch per task, ≤6 files,
+squash/merge with manual review between PRs; the fix stacked is rebased over
+the branch that reported it (the rustsec fix rebased over the PR-1 branch
+that reported the advisory); the new handler's coverage travels in the SAME
+PR that implements it.
 
-- **Regla**: cuando un hallazgo surge sobre UNA rama, el fix se rebase sobre
-  ella (la pila lineal); nunca desde main — la revisión queda como diff
-  incremental encima de lo ya sabido.
-- **Evidencia**: rebase `fix/rustsec-2026-0385` sobre `feature/T012-startup-db-ping`
-  tras el feedback del operador.
+- **Rule**: when a finding surfaces on ONE branch, its fix rebases over that
+  branch (the stack stays linear); never from main — the review then reads as
+  an incremental diff on top of what is already known.
+- **Evidence**: the rebase of `fix/rustsec-2026-0385` over
+  `feature/T012-startup-db-ping` after the operator's feedback.
