@@ -13,7 +13,7 @@ use axum::{
     Router,
 };
 
-use crate::domain::auth;
+use crate::domain::{auth, profile};
 use crate::errors::{ApiError, Problem};
 use crate::middleware::auth::AuthenticatedUser;
 use crate::state::AppState;
@@ -58,8 +58,10 @@ pub fn build_router(state: AppState) -> Router {
     // request is rejected before reaching the handler (deny-by-default).
     let protected = Router::new()
         .route("/v1/auth/revoke", post(handlers::revoke))
-        .route("/v1/profile", get(stub_protected_503))
-        .route("/v1/profile", put(stub_protected_503))
+        // The profile flow (T018, US3) — the CV routes stay stubs until
+        // T021.
+        .route("/v1/profile", get(profile::handlers::get_profile))
+        .route("/v1/profile", put(profile::handlers::put_profile))
         .route("/v1/cv/text", post(stub_protected_503))
         .route("/v1/cv/text", get(stub_protected_503))
         .route("/v1/cv/versions", get(stub_protected_503))

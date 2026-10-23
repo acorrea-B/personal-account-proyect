@@ -5,3 +5,4 @@
 //! `cv` (US4).
 
 pub mod auth;
+pub mod profile;
