@@ -394,62 +394,84 @@ Tabla canónica de status:
 - GDPR completo: export de datos de cuenta
 - **Era LLM (D15):** contabilidad de uso/quota-credits por usuario (los costos por token exigen cap por cuenta) · cola de jobs asíncronos con patrón 202 + job status para `cv:process` · embeddings/semántica vía pgvector en el mismo Supabase Postgres (match profesional avanzado)
 
-## 16. Plan de ejecución T011/T012 — register (US1) + arranque con prueba de DB
+## 16. Execution plan T011/T012 — register (US1) + the startup DB proof
 
-**Estado del árbol**: T001-T010 hechas (foundations, §8). Faltan 16 tareas; esta fase cubre 3 (T011/T012/T013 del MVP de US1) + la ampliación operativa que el operador pidió.
+**Tree state**: T001-T010 done (foundations, §8). 16 tasks remain; this phase
+covers 3 (T011/T012/T013 of the US1 MVP) + the operational amplification the
+operator asked for.
 
-### 16.1 Modelo de conexiones serverless (insumo del operador)
+### 16.1 The serverless connection model (the operator's input)
 
-Las funciones abren/cierran conexiones por cold start — nada del pool es estable como un
-servidor 24/7: el pool interno de la instancia muere con ella a cada scale-down. Dos
-consecuencias operativas:
+Functions open/close connections per cold start — nothing of the pool is
+stable like a 24/7 server: the instance's internal pool dies with it at every
+scale-down. Two operational consequences:
 
-1. **Prueba de conexión al arranque** (§16.2): un ping `SELECT 1` en `AppState::build`
-   loggea la viabilidad del pooler en cada cold start — es la señal barata de que la BD
-   funciona *antes* del primer request real.
-2. **Pooler transacción (6543) para el API** — diferido al cierre de este ciclo: cada
-   conexión del pool en modo sesión (5432) mantiene una sesión pegada a Supabase por la
-   vida de la instancia; el modo transacción libera por transacción. Es cambio de secret
-   de producción (GitHub env), sin cambio de código. El `DATABASE_URL` de migraciones
-   (5432, modo sesión) queda como está.
+1. **The connectivity proof at startup** (§16.2): an eager `connect` in
+   `AppState::build` proves the pooler on every cold start — the cheap signal
+   that the DB works *before* the first real request.
+2. **Transaction pooler (6543) for the API** — deferred to the end of this
+   cycle: every pool connection in session mode (5432) holds a pinned session
+   in Supabase for the instance's lifetime; transaction mode releases per
+   transaction. It is a production secret change (the GitHub env), no code
+   change. The migrations' `DATABASE_URL` (5432, session mode) stays as is.
 
-### 16.2 Ampliación: ping de arranque en `AppState::build`
+### 16.2 The amplification: the startup proof in `AppState::build`
 
-- Tras `PgPoolOptions::connect_lazy`: un `SELECT 1` acotado (timeout constante de 10s en
-  `state.rs` — sin variable nueva de config, el arranque no es un SLA negociable).
-- Éxito → `tracing::info!` con latencia y `db_max_connections` — el log de arranque
-  pedido (§5 del runbook: "la conexión a la BD fue exitosa").
-- Fallo → `tracing::error!` + falla el cold start (`StartupError::Database`): un 500
-  temprano con causa en el log mejor que un error tardío por request (decisión del
-  operador pedida por defecto).
+- The eager `connect` IS the probe (sqlx opens the first physical connection
+  there) — no new config variable: the startup is not a negotiable SLA.
+- Success → `tracing::info!` with the latency and the `db_max_connections` —
+  the startup log the operator asked for (§ "the connection was successful").
+- Failure → `tracing::error!` + the cold start fails (`StartupError::Database
+`): an early 500 with the cause in the log beats a late error per request
+  (the operator's default decision).
 
-### 16.3 T012 (implementación) — `src/domain/auth/`
+### 16.3 T012 (implementation) — `src/domain/auth/`
 
-- `dto.rs`: `RegisterRequest` (validator: email formato, contraseña política R4) +
-  `RegisterResponse` + `ResendRequest` — respeta la regla ≤2 structs por archivo
-  (división en archivos separados si hace falta).
-- `handlers.rs`: `register` — normalize email (trim+lowercase, FR-002) ANTES de validar;
-  `signup` vía cliente T008; mapeo de errores de Supabase → catálogo: `user_exists` →
-  409 `email-exists` (case-insensitive), `weak_password` → 422 con requirements, red/5xx
-  → 503 (cuenta creada sin email — el resend cubre); 201 `{user}` sin credenciales
-  (FR-003) + emisión `auth.registered` (T009) — register NO crea el perfil espejo
-  (FR-004: trigger T003).
-- `resend_verification`: respuesta genérica SIEMPRE (FR-006) + emisión
-  `auth.verification_sent`.
-- Wiring en `router.rs`: register y resend pasan del stub al dominio — login/refresh/
-  revoke siguen stub hasta T014/T015.
+- `dto.rs`: `RegisterRequest` (validator: email format, password policy R4) +
+  `ResendRequest` — the ≤2-structs-per-file rule respected.
+- `handlers.rs`: `register` — the email normalizes (trim+lowercase, FR-002)
+  BEFORE validating; `signup` through the client T008; the Supabase error
+  mapping → catalogue: `user_exists` → 409 `email-exists` (case-insensitive),
+  `weak_password` → 422 with requirements, network/5xx → 503 (account created
+  without the email — the resend covers it); 201 `{user}` with no credentials
+  (FR-003) + the emission of `auth.registered` (T009) — register does NOT
+  create the profile mirror (FR-004: the trigger T003).
+- `resend_verification`: the generic response ALWAYS (FR-006) + the emission
+  of `auth.verification_sent`.
+- Wiring in `router.rs`: register and resend go from the stub to the domain —
+  login/refresh/revoke stay stubs until T014/T015.
 
 ### 16.4 T011 (tests, red→green): `tests/integration/register.rs`
 
-201 sin tokens (FR-003) · email normalizado en respuesta y BD (FR-002) · `email-exists`
-409 case-insensitive · `email-malformed` 422 · `weak-password` 422 con requirements ·
-reenvío genérico 200 · login pre-verificación → 403 `email-not-verified` con
-`can_resend: true` · perfil creado tras verificar (FR-004; T013 lo completa).
+201 without tokens (FR-003) · email normalized in the response and the DB
+(FR-002) · `email-exists` 409 case-insensitive · `email-malformed` 422 ·
+`weak-password` 422 with requirements · the generic resend 200 · login
+pre-verification → 403 `email-not-verified` with `can_resend: true` · the
+profile created after verifying (FR-004; T013 completes it).
 
-### 16.5 Entrega (ramas apiladas, ≤6 archivos, pausa de revisión por PR)
+### 16.5 Delivery (stacked branches, ≤6 files, a review pause per PR)
 
-1. **PR-1** `feature/T012-startup-db-ping`: §16.2 (`state.rs`)
-2. **PR-2** `feature/T012-register-handlers`: §16.3 (+ dto tests unitarios)
-3. **PR-3** `feature/T011-register-tests`: §16.4
-4. **Operación** (con el operador): `DATABASE_URL` de prod → pooler transacción 6543.
-- **Auditoría persistente (D18):** tabla `audit_events` consultable desde la app (sobrevive a rotación de logs) — aditiva: escribe con el mismo envelope/taxonomía definidos en §13.5
+1. **PR-1** `feature/T012-startup-db-ping`: §16.2 (`state.rs`) — merged.
+2. **PR-2** `feature/T012-register-handlers`: §16.3 (+ dto unit tests) — merged.
+3. **PR-3** `feature/T014-T015-login-refresh`: the US2 handlers + T014 tests
+   (the revoke flow pends the session-revocation design decision).
+4. **Operation** (with the operator): the production `DATABASE_URL` →
+   transaction pooler 6543.
+
+### 16.6 The US2 open decision: the revocation of a stateless credential
+
+FR-009 demands rejecting EVERY subsequent request with a revoked credential,
+but the local verification (signature→exp→iss/aud) cannot see sessions. The
+options with their costs:
+
+- **(a) Stateless window** (the OAuth standard): the revoke kills the pair;
+  the access token keeps serving until its expiration (up to 1h) — violates
+  FR-009 verbatim.
+- **(b, recommended) The session check per protected request** against goTrue
+  (`GET /auth/v1/user` with the bearer), cached short per token (30-60s): it
+  detects revoked/deleted-user for real; the cost is one extra call per
+  protected request (amortised by the cache; the signature filter kills the
+  garbage before the round trip).
+- **(c) An own revocations table** (new migration + a DB lookup per request):
+  the worst serverless mix (the connection pool already pays; the migration
+  is a new schema state).
