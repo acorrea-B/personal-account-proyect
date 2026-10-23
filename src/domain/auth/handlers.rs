@@ -199,3 +199,274 @@ fn field_error_of(errors: &validator::ValidationErrors) -> ApiError {
         ApiError::EmailMalformed
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clients::supabase_auth::SupabaseAuthClient;
+    use crate::domain::auth::dto::{password_policy, RegisterRequest, ResendRequest};
+    use crate::middleware::hs256::Hs256Verifier;
+    use crate::router::build_router;
+    use axum::http::Request;
+    use axum::routing::post as post_route;
+    use axum::Router;
+    use serde_json::Value;
+    use sqlx::postgres::PgPoolOptions;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tower::ServiceExt;
+
+    /// The answer default of the fake signup: the user with id (the shape
+    /// of Supabase with the confirmation flow on — no session travels).
+    const SIGNUP_USER: &str =
+        r#"{"id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301", "email": "juan@example.com"}"#;
+
+    /// The fake of Supabase Auth: the same in-process server of the jwks
+    /// tests (axum is a dependency of prod — no dev-dependency of mock http).
+    /// The mutable status/body simulates the codes of Supabase; the signup
+    /// and the resend share the state.
+    type FakeSupabase = std::sync::Arc<Mutex<(u16, String)>>;
+
+    fn set_response(fake: &FakeSupabase, status: u16, body: &str) {
+        *fake.lock().expect("the fake never poisons") = (status, body.to_string());
+    }
+
+    async fn serve_supabase(State(fake): State<FakeSupabase>) -> (StatusCode, String) {
+        let (status, body) = fake.lock().expect("the fake never poisons").clone();
+        (
+            StatusCode::from_u16(status).expect("the fake status is valid"),
+            body,
+        )
+    }
+
+    async fn spawn_fake_supabase() -> (FakeSupabase, String) {
+        let fake: FakeSupabase = Arc::new(Mutex::new((200, SIGNUP_USER.to_string())));
+        let app = Router::new()
+            .route("/auth/v1/signup", post_route(serve_supabase))
+            .route("/auth/v1/resend", post_route(serve_supabase))
+            .with_state(fake.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the ephemeral port opens");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("the bind keeps it")
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("the fake serves") });
+        (fake, url)
+    }
+
+    /// A state like the production one (the client against the fake; the
+    /// pool lazy — no DB is touched in these tests).
+    async fn test_state() -> (AppState, FakeSupabase) {
+        let (fake, url) = spawn_fake_supabase().await;
+        let state = AppState {
+            pool: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/postgres")
+                .expect("the connection string is valid"),
+            supabase_url: url.clone(),
+            service_role_key: "test-service-role-key".to_string(),
+            jwt_secret: String::new(),
+            jwt_issuer: "supabase".to_string(),
+            jwt_audience: "authenticated".to_string(),
+            supabase_auth: SupabaseAuthClient::new(
+                &url,
+                "test-publishable",
+                "test-service-role-key",
+                Duration::from_secs(1),
+            ),
+            signature_verifier: Arc::new(Hs256Verifier::new(
+                "test-jwt-secret",
+                Some("supabase"),
+                "authenticated",
+            )),
+        };
+        (state, fake)
+    }
+
+    async fn body_of(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 32 * 1024)
+            .await
+            .expect("the body reads");
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    async fn register_of(state: &AppState, email: &str, password: &str) -> (StatusCode, Value) {
+        let response = register(
+            State(state.clone()),
+            HeaderMap::new(),
+            Ok(Json(RegisterRequest {
+                email: email.to_string(),
+                password: password.to_string(),
+            })),
+        )
+        .await;
+        let status = response.status();
+        (status, body_of(response).await)
+    }
+
+    /// The register of the contract: 201 with the normalized email, the
+    /// `verified: false` deterministic, an ISO8601 instant and never
+    /// credentials (FR-001..003, FR-002).
+    #[tokio::test]
+    async fn the_register_answers_the_201_of_the_contract_without_credentials() {
+        let (state, _fake) = test_state().await;
+        let (status, body) = register_of(&state, " JUAN@Example.com ", "contraseña1").await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        let user = &body["user"];
+        assert_eq!(user["email"], "juan@example.com", "FR-002 normalized");
+        assert_eq!(user["verified"], false);
+        chrono::DateTime::parse_from_rfc3339(
+            user["created_at"]
+                .as_str()
+                .expect("instant of the contract"),
+        )
+        .expect("the instant is ISO8601");
+        uuid::Uuid::parse_str(user["id"].as_str().expect("the id travels")).expect("uuid");
+        assert!(body.get("access_token").is_none(), "no credentials travel");
+        assert!(body.get("refresh_token").is_none(), "FR-003");
+    }
+
+    /// The email that already exists: the catalogue 409 (the client T008
+    /// maps the code; the pass-through of the handler). Case-insensitive:
+    /// the normalized email is the one that travels.
+    #[tokio::test]
+    async fn an_existing_email_resolves_the_409_of_the_catalogue() {
+        let (state, fake) = test_state().await;
+        set_response(&fake, 400, r#"{"error_code": "user_already_exists"}"#);
+
+        let (status, body) = register_of(&state, "juan@example.com", "contraseña1").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("email-exists"));
+    }
+
+    /// The weak password (R4): 422 with the requirements as extension — and
+    /// without touching Supabase (the validation cuts before).
+    #[tokio::test]
+    async fn a_weak_password_answers_the_422_with_the_requirements() {
+        let (state, _fake) = test_state().await;
+        let (status, body) = register_of(&state, "juan@example.com", "solo-letras").await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("weak-password"));
+        let requirements = body["requirements"].to_string();
+        assert!(
+            requirements.contains("length"),
+            "the R4 requirements travel"
+        );
+    }
+
+    /// The malformed email: the 422 of the catalogue, before any network.
+    #[tokio::test]
+    async fn a_malformed_email_answers_the_422_before_the_network() {
+        let (state, _fake) = test_state().await;
+        let (status, body) = register_of(&state, "no-es-un-email", "contraseña1").await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("email-malformed"));
+    }
+
+    /// The body that is not the JSON of the contract: the 400 canonical of
+    /// the catalogue, never the plain text of axum (at the router level:
+    /// the rejection of the extractor is of the wiring).
+    #[tokio::test]
+    async fn a_body_that_is_not_json_answers_the_400_of_the_catalogue() {
+        let (state, _fake) = test_state().await;
+        let router = build_router(state);
+
+        let response = router
+            .oneshot(
+                Request::post("/v1/auth/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from("no-es-json"))
+                    .expect("the request is valid"),
+            )
+            .await
+            .expect("the router never fails");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The resend of an email that does not exist: the 200 generic ALWAYS
+    /// (FR-006 — the leak of existence is the attack; the unmapped codes of
+    /// Supabase resolve the generic answer).
+    #[tokio::test]
+    async fn the_resend_of_an_unknown_email_answers_generic() {
+        let (state, fake) = test_state().await;
+        set_response(&fake, 400, r#"{"error_code": "user_not_found"}"#);
+
+        let response = resend_verification(
+            State(state.clone()),
+            HeaderMap::new(),
+            Ok(Json(ResendRequest {
+                email: "desconocido@example.com".to_string(),
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "FR-006 never denies");
+        let body = body_of(response).await;
+        assert_eq!(
+            body["message"],
+            "Si el email corresponde a una cuenta pendiente, se envió un enlace."
+        );
+    }
+
+    /// The malformed email of the resend: the only problem that the flow
+    /// admits (422, before any network).
+    #[tokio::test]
+    async fn the_resend_of_a_malformed_email_answers_the_422() {
+        let (state, _fake) = test_state().await;
+        let response = resend_verification(
+            State(state.clone()),
+            HeaderMap::new(),
+            Ok(Json(ResendRequest {
+                email: "no-es-un-email".to_string(),
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body_of(response).await["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("email-malformed"));
+    }
+
+    /// The resend that Supabace accepted: 200 with the generic message of
+    /// the contract (FR-005/006) and the event of the taxonomy.
+    #[tokio::test]
+    async fn the_accepted_resend_answers_the_generic_message_of_the_contract() {
+        let (state, _fake) = test_state().await;
+        let response = resend_verification(
+            State(state.clone()),
+            HeaderMap::new(),
+            Ok(Json(ResendRequest {
+                email: "juan@example.com".to_string(),
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_of(response).await["message"],
+            "Si el email corresponde a una cuenta pendiente, se envió un enlace."
+        );
+    }
+
+    /// The policy R4 as unit (the edge cases of the requirements alone).
+    #[test]
+    fn the_password_policy_of_the_catalogue_holds() {
+        assert!(password_policy("contraseña1").is_ok());
+        assert!(password_policy("short").is_err());
+        assert!(password_policy("sin numeros").is_err());
+        assert!(password_policy("12345678").is_err());
+    }
+}
