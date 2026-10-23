@@ -20,6 +20,7 @@ use crate::domain::auth::dto::{RegisterRequest, ResendRequest};
 use crate::domain::auth::dto_session::{LoginRequest, RefreshRequest};
 use crate::errors::{ApiError, Problem};
 use crate::events::{Event, Outcome, Taxonomy};
+use crate::middleware::auth::AuthenticatedUser;
 use crate::state::AppState;
 
 /// The public face of the user (the contract of register FR-003): never
@@ -207,6 +208,38 @@ fn session_response(session: &Session) -> serde_json::Value {
     })
 }
 
+/// `POST /v1/auth/revoke` (FR-009, US2): the logout of the current
+/// session — the Supabase side kills it and the session-state cache
+/// invalidates HERE: the very next request with the same credential reads
+/// its `token-revoked` (the window of revocation closes in this handler,
+/// not with the TTL).
+pub async fn revoke(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    user: AuthenticatedUser,
+) -> Response {
+    const PATH: &str = "/v1/auth/revoke";
+
+    // The logout of the session of the credential (scope local — the
+    // revoke = the logout semantics of the beta, DRY: one route).
+    match state.supabase_auth.revoke(&user.token, false).await {
+        Ok(()) => {
+            state.session_check.invalidate(&user.token);
+            Event::new(
+                Taxonomy::AuthSessionRevoked,
+                Outcome::Accepted,
+                request_id_of(&headers),
+                Some(user.user_id.to_string()),
+                None,
+                Event::no_meta(),
+            )
+            .emit();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(api_error) => Problem::new(api_error).on(PATH).into_response(),
+    }
+}
+
 /// `POST /v1/auth/login` (FR-006, US2): the normalized email travels to
 /// Supabase — a wrong shape of credential is `invalid-credentials` (401),
 /// identical and comparable in time for a bad password and for a
@@ -348,6 +381,7 @@ mod tests {
     use crate::domain::auth::dto::{password_policy, RegisterRequest, ResendRequest};
     use crate::middleware::hs256::Hs256Verifier;
     use crate::router::build_router;
+    use crate::state::SessionCheck;
     use axum::http::Request;
     use axum::routing::post as post_route;
     use axum::Router;
@@ -386,6 +420,7 @@ mod tests {
             .route("/auth/v1/signup", post_route(serve_supabase))
             .route("/auth/v1/token", post_route(serve_supabase))
             .route("/auth/v1/resend", post_route(serve_supabase))
+            .route("/auth/v1/logout", post_route(serve_supabase))
             .with_state(fake.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -406,6 +441,7 @@ mod tests {
             pool: PgPoolOptions::new()
                 .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/postgres")
                 .expect("the connection string is valid"),
+            session_check: SessionCheck::trusted(),
             supabase_url: url.clone(),
             service_role_key: "test-service-role-key".to_string(),
             jwt_secret: String::new(),
@@ -656,6 +692,41 @@ mod tests {
             .expect("type")
             .ends_with("rate-limited"));
         assert!(body["retry_after_seconds"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[tokio::test]
+    async fn the_revoke_answers_204_and_closes_the_credential_at_once() {
+        let (state, fake) = test_state().await;
+        set_response(&fake, 204, "{}");
+        // The REAL cache: the trusted() of the state literal short-circuits
+        // the checks — here the invalidation is the behavior under test.
+        let state = {
+            let mut trusted_state = state.clone();
+            trusted_state.session_check = SessionCheck::default();
+            trusted_state
+        };
+        // The credential the revoke is about to kill: cached-alive first
+        // (the steady state of a user browsing).
+        state.session_check.record("the-credential");
+        assert!(state.session_check.alive_within_ttl("the-credential"));
+
+        let response = revoke(
+            State(state.clone()),
+            HeaderMap::new(),
+            AuthenticatedUser {
+                user_id: Uuid::parse_str("3f2504e0-4f89-41d3-9a0c-0305e82c3301").expect("uuid"),
+                token: "the-credential".to_string(),
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        // The revocation closes the window AT ONCE (not with the TTL): the
+        // next request with the same credential reads token-revoked.
+        assert!(
+            !state.session_check.alive_within_ttl("the-credential"),
+            "the invalidation is immediate"
+        );
     }
 
     #[tokio::test]

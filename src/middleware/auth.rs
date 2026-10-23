@@ -39,6 +39,10 @@ pub struct Claims {
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
     pub user_id: Uuid,
+    /// The raw credential: the flows that operate ON the session (the
+    /// revoke of FR-009 and its cache invalidation) own it — everything
+    /// else must treat it as opaque and never echo it.
+    pub token: String,
 }
 
 impl FromRequestParts<AppState> for AuthenticatedUser {
@@ -61,18 +65,38 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
             .await
             .map_err(|api_error| Problem::new(api_error).on(request_path(parts)))?;
 
-        claims
-            .sub
-            .parse::<Uuid>()
-            .map(|user_id| AuthenticatedUser { user_id })
-            .map_err(|_| {
-                // A non-uuid `sub` is not an identity of the project: it is
-                // rejected by default.
-                Problem::new(ApiError::Unauthorized {
-                    detail: "The credential does not carry a valid identity.".to_string(),
-                })
-                .on(request_path(parts))
+        let user_id = claims.sub.parse::<Uuid>().map_err(|_| {
+            // A non-uuid `sub` is not an identity of the project: it is
+            // rejected by default.
+            Problem::new(ApiError::Unauthorized {
+                detail: "The credential does not carry a valid identity.".to_string(),
             })
+            .on(request_path(parts))
+        })?;
+
+        // The session state (plan §16.6, option b — the operator's ruling:
+        // the rotation is mandatory): the signature above killed the
+        // garbage; a verifiable credential can still belong to a dead
+        // session or a deleted user — goTruth decides. The cached-alive
+        // answer covers the steady state (the TTL amortises the round
+        // trip); the revoke's own invalidation closes the window.
+        if !state.session_check.alive_within_ttl(&token) {
+            match state.supabase_auth.session_alive(&token).await {
+                Ok(true) => state.session_check.record(&token),
+                Ok(false) => {
+                    return Err(Problem::new(ApiError::TokenRevoked {
+                        detail: "The session was revoked or the account no longer exists."
+                            .to_string(),
+                    })
+                    .on(request_path(parts)));
+                }
+                Err(api_error) => {
+                    return Err(Problem::new(api_error).on(request_path(parts)));
+                }
+            }
+        }
+
+        Ok(AuthenticatedUser { user_id, token })
     }
 }
 
@@ -190,5 +214,90 @@ mod tests {
         assert!(document["type"]
             .as_str()
             .is_some_and(|t| t.ends_with("token-expired")));
+    }
+
+    /// The session state (§16.6, option b): the signature-valid credential
+    /// whose session died at goTruth reads `token-revoked` — never an
+    /// anonymous pass, never the generic internal.
+    #[tokio::test]
+    async fn a_credential_of_a_dead_session_answers_token_revoked() {
+        use crate::clients::supabase_auth::SupabaseAuthClient;
+        use crate::state::{AppState, SessionCheck};
+        use sqlx::postgres::PgPoolOptions;
+        use std::sync::Arc;
+        use tower::ServiceExt;
+
+        // The goTruth that rejects the session (the 401 in any route).
+        let app = axum::Router::new().fallback(|| async { axum::http::StatusCode::UNAUTHORIZED });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the ephemeral port opens");
+        let base = format!(
+            "http://{}",
+            listener.local_addr().expect("the bind keeps it")
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serves") });
+
+        let state = AppState {
+            pool: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/postgres")
+                .expect("the connection string is valid"),
+            session_check: SessionCheck::default(),
+            supabase_url: base.clone(),
+            service_role_key: "test-service-role-key".to_string(),
+            jwt_secret: String::new(),
+            jwt_issuer: "supabase".to_string(),
+            jwt_audience: "authenticated".to_string(),
+            supabase_auth: SupabaseAuthClient::new(
+                &base,
+                "test-publishable",
+                "test-service-role-key",
+                std::time::Duration::from_secs(1),
+            ),
+            signature_verifier: Arc::new(Hs256Verifier::new(
+                "test-jwt-secret",
+                Some("supabase"),
+                "authenticated",
+            )),
+        };
+
+        // The credential the Hs256 verifier signs ok (the session check
+        // runs after the signature).
+        // The credential the Hs256 verifier signs ok (inline — the hs256
+        // module's own token fn is its test-fixture business).
+        let signed = {
+            let claims = serde_json::json!({
+                "sub": "c0a8e1f2-33b4-4c5d-8e9f-a0b1c2d3e4f5",
+                "aud": "authenticated",
+                "exp": 4_102_344_000_000_u64,
+            });
+            encode(
+                &JwtHeader::new(Algorithm::HS256),
+                &claims,
+                &EncodingKey::from_secret("test-jwt-secret".as_bytes()),
+            )
+            .expect("the test token signs")
+        };
+
+        let router = build_router(state.clone());
+        let response = router
+            .oneshot(
+                Request::get("/v1/profile")
+                    .header(header::AUTHORIZATION, format!("Bearer {signed}"))
+                    .body(Body::empty())
+                    .expect("the request is valid"),
+            )
+            .await
+            .expect("the router never fails");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), 1024)
+            .await
+            .expect("the problem reads");
+        let document: serde_json::Value =
+            serde_json::from_slice(&body).expect("the problem is JSON");
+        assert!(document["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("token-revoked")));
     }
 }

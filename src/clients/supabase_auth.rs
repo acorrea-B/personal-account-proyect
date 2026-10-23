@@ -155,6 +155,31 @@ impl SupabaseAuthClient {
         .map(|_| ())
     }
 
+    /// `GET /auth/v1/user` with the access token of the credential (the
+    /// session-state check of the plan §16.6, option b): the session of a
+    /// verifiable token can still be revoked or the user deleted — goTruth
+    /// rejects here; the retries of R7 for the transient 5xx/network and
+    /// the `RateLimited` pass through. The other 4xx = the session is NOT
+    /// alive (the caller renders `token-revoked` — FR-010).
+    pub async fn session_alive(&self, access_token: &str) -> Result<bool, ApiError> {
+        match self
+            .request_with(
+                reqwest::Method::GET,
+                "/auth/v1/user",
+                Auth::Publishable,
+                None,
+                Some(access_token),
+            )
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error @ (ApiError::RateLimited { .. } | ApiError::DependencyUnavailable)) => {
+                Err(error)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
     /// `POST /auth/v1/logout` with the access token of the user (FR-009):
     /// `global` kills every session of the user, `local` only the current.
     pub async fn revoke(&self, access_token: &str, global: bool) -> Result<(), ApiError> {
@@ -857,5 +882,54 @@ mod tests {
             .sign_in_with_password("user@mail.com", "Passw0rd1")
             .await;
         assert_eq!(result.unwrap_err().slug(), "internal");
+    }
+
+    /// The session-state check (§16.6, option b): the alive session says
+    /// true; the goTruth's 4xx (a dead session / a missing user) = NOT
+    /// alive; the RateLimited and the unreachable network pass their
+    /// error (fail-closed: the unchecked session NEVER passes).
+    #[tokio::test]
+    async fn the_session_check_decides_alive_dead_and_dependency() {
+        // alive: the /user of a live session.
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::OK,
+                serde_json::json!({ "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301" }),
+            )
+        })
+        .await;
+        assert!(client(&base).session_alive("the-access").await.unwrap());
+
+        // dead: any 4xx of goTruth.
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::from_u16(401).expect("valid"),
+                serde_json::json!({ "error": "invalid_grant", "error_description": "Invalid token" }),
+            )
+        })
+        .await;
+        assert!(!client(&base).session_alive("the-dead").await.unwrap());
+
+        // the transient rate limit passes through (the caller renders it).
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::from_u16(429).expect("valid"),
+                serde_json::json!({ "error_code": "over_request_rate_limit" }),
+            )
+        })
+        .await;
+        let result = client(&base).session_alive("the-limited").await;
+        assert_eq!(result.unwrap_err().slug(), "rate-limited");
+
+        // the unreachable: fail-closed (503), never a pass.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the ephemeral port opens");
+        let address = listener.local_addr().expect("the bind keeps it");
+        drop(listener);
+        let result = client(&format!("http://{address}"))
+            .session_alive("the-unchecked")
+            .await;
+        assert_eq!(result.unwrap_err().slug(), "dependency-unavailable");
     }
 }

@@ -11,6 +11,40 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use std::time::Instant;
 
+use tower::ServiceExt;
+
+/// One request WITH the credential (the protected flow of the revoke):
+/// the bearer travels with the correlation id — the same plumbing of
+/// `call`, local to this suite (its only consumer).
+async fn call_with_credentials(
+    application: &perfil_api::Application,
+    method: &str,
+    path: &str,
+    bearer: &str,
+    body: Option<serde_json::Value>,
+) -> axum::response::Response {
+    let mut builder = axum::http::Request::builder().method(method).uri(path);
+    builder = builder
+        .header("x-request-id", new_request_id())
+        .header("authorization", format!("Bearer {bearer}"));
+    let request = match body {
+        Some(value) => builder
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(value.to_string()))
+            .expect("the request is valid"),
+        None => builder
+            .body(axum::body::Body::empty())
+            .expect("the request is valid"),
+    };
+
+    application
+        .router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("the router never fails")
+}
+
 /// The login answer of the contract (FR-006): the pair + TTL + the user
 /// public — never less. `verified` comes real from Supabase (the fixture of
 /// a confirmed account).
@@ -253,4 +287,59 @@ async fn the_unknown_refresh_token_answers_the_catalogue() {
     assert!(body["type"]
         .as_str()
         .is_some_and(|t| t.ends_with("invalid-refresh-token")));
+}
+
+/// FR-009 end to end: the revoke of the session (204) kills the credential
+/// — the very next request with the same credential reads `token-revoked`
+/// (the revocation window closes in the revoke handler, not with the TTL).
+///
+/// CAPABILITY PROBE (learned.md): the legacy local stack answers an EMPTY
+/// JWKS (`keys: []`) — its HS256 credentials are not verifiable through
+/// JWKS and the signature gate rejects everything: the flow runs only on
+/// the stacks with real JWKS (the CI's modern one); the legacy documents
+/// and ends.
+#[tokio::test]
+async fn the_revoke_kills_the_credential_in_the_next_request() {
+    let Some(app) = app().await else {
+        return;
+    };
+    let user = admin_create_user(true).await;
+    let login = call(
+        &app,
+        "POST",
+        "/v1/auth/login",
+        Some(serde_json::json!({ "email": user.email, "password": user.password })),
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::OK);
+    let login = json_of(login).await;
+    let access = login["access_token"].as_str().expect("the access");
+
+    let first = call_with_credentials(&app, "POST", "/v1/auth/revoke", access, None).await;
+    if first.status() == StatusCode::UNAUTHORIZED {
+        // The legacy stack: the signature gate cannot verify (empty JWKS).
+        let body = json_of(first).await;
+        assert!(
+            body["type"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("unauthorized")),
+            "an unexpected rejection stops the capability probe"
+        );
+        eprintln!(
+            "the test stack verifies nothing through JWKS (legacy): the revoke flow pends the CI"
+        );
+        return;
+    }
+    assert_eq!(first.status(), StatusCode::NO_CONTENT, "FR-009: the revoke");
+
+    let second = call_with_credentials(&app, "POST", "/v1/auth/revoke", access, None).await;
+    assert_eq!(
+        second.status(),
+        StatusCode::UNAUTHORIZED,
+        "the killed credential never passes again"
+    );
+    let body = json_of(second).await;
+    assert!(body["type"]
+        .as_str()
+        .is_some_and(|t| t.ends_with("token-revoked")));
 }
