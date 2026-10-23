@@ -92,7 +92,7 @@ pub async fn register(
     let email = std::mem::take(&mut request.email);
 
     match state.supabase_auth.signup(&email, &request.password).await {
-        Ok(user_id) => {
+        Ok((user_id, verified)) => {
             Event::new(
                 Taxonomy::AuthRegistered,
                 Outcome::Accepted,
@@ -103,9 +103,12 @@ pub async fn register(
             )
             .emit();
 
-            // R5: the verification email always travels — `verified` is
-            // deterministic in register; the client resolves it with its own
-            // instant of creation (± the ms of this response).
+            // The verification state is HONEST: the verification flow leaves
+            // it false (R5 sent the email); the autoconfirm stacks of
+            // goTruth (the CI's local, the era without confirmations)
+            // confirm the account in the instant of the signup — the
+            // response echoes the reality, and the mirror's trigger (FR-004)
+            // still only fires on the CONFIRMATION's UPDATE.
             let instant = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
             (
                 StatusCode::CREATED,
@@ -113,7 +116,7 @@ pub async fn register(
                     user: UserPublic {
                         id: user_id,
                         email,
-                        verified: false,
+                        verified,
                         created_at: instant,
                     },
                 }),
@@ -729,6 +732,65 @@ mod tests {
         );
     }
 
+    /// The autoconfirm of the stack (the CI's local — the era without
+    /// confirmations): the signup answers the FULL session; the register
+    /// echoes its user as honest (verified TRUE — the account confirmed at
+    /// the instant) and NEVER the credentials of the session (FR-003).
+    #[tokio::test]
+    async fn the_autoconfirmed_signup_verifies_honest_and_carries_no_credentials() {
+        let (state, fake) = test_state().await;
+        set_response(
+            &fake,
+            200,
+            r#"{
+                "access_token": "the-access", "refresh_token": "the-refresh", "expires_in": 3600,
+                "user": {
+                    "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+                    "email": "juan@example.com",
+                    "email_confirmed_at": "2026-10-23T00:00:00Z",
+                    "created_at": "2026-10-23T00:00:00Z"
+                }
+            }"#,
+        );
+
+        let (status, body) = register_of(&state, "juan@example.com", "contraseña1").await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["user"]["id"], "3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+        assert_eq!(
+            body["user"]["verified"], true,
+            "the honest verification of the stack"
+        );
+        assert!(
+            body.get("access_token").is_none(),
+            "FR-003: the tokens never travel"
+        );
+    }
+
+    /// A malformed credential of renewal (the request-validation of the
+    /// MODERN goTruth — 422 validation_failed on the token grant): the 400
+    /// of the contract "malformed → bad-request" — never the email's 422
+    /// of the same code (the route decides the slug in the client).
+    #[tokio::test]
+    async fn a_malformed_refresh_credential_answers_the_400_of_the_contract() {
+        let (state, fake) = test_state().await;
+        set_response(
+            &fake,
+            422,
+            r#"{"code": 422, "error_code": "validation_failed", "msg": "Unable to validate refresh token: invalid UUID length"}"#,
+        );
+
+        let (status, body) = refresh_of(&state, "no-es-token").await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the route decides the slug"
+        );
+        assert!(body["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("bad-request"));
+    }
+
     #[tokio::test]
     async fn the_refresh_of_a_dead_dependency_answers_the_503() {
         let (state, fake) = test_state().await;
@@ -738,7 +800,7 @@ mod tests {
             r#"{"error": "upstream", "error_description": "the platform is down"}"#,
         );
 
-        let (status, body) = refresh_of(&state, "the-token").await;
+        let (status, body) = refresh_of(&state, "3f2504e0-4f89-41d3-9a0c-0305e82c3301").await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(body["type"]
             .as_str()
@@ -850,7 +912,7 @@ mod tests {
         let (state, fake) = test_state().await;
         set_response(&fake, 200, TOKEN_BODY);
 
-        let (status, body) = refresh_of(&state, "the-old-refresh").await;
+        let (status, body) = refresh_of(&state, "7f5e9a1c-2b5d-42e0-97a1-f1c7b7adfa2d").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["access_token"], "the-access");
         assert_eq!(body["refresh_token"], "the-refresh");
@@ -868,7 +930,7 @@ mod tests {
             r#"{"error_code": "refresh_token_already_used", "msg": "Invalid Refresh Token"}"#,
         );
 
-        let (status, body) = refresh_of(&state, "the-reused").await;
+        let (status, body) = refresh_of(&state, "a1b2c3d4-e5f6-47a8-8b9c-0d1e2f3a4b5c").await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(body["type"]
             .as_str()
@@ -887,7 +949,7 @@ mod tests {
             r#"{"error_code": "refresh_token_not_found", "msg": "Invalid Refresh Token"}"#,
         );
 
-        let (status, body) = refresh_of(&state, "the-unknown").await;
+        let (status, body) = refresh_of(&state, "c0a8e1f2-33b4-4c5d-8e9f-a0b1c2d3e4f5").await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert!(body["type"]
             .as_str()

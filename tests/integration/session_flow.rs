@@ -265,28 +265,51 @@ async fn the_renewal_rotates_and_the_reuse_kills_the_whole_session() {
         .is_some_and(|t| t.ends_with("invalid-refresh-token")));
 }
 
-/// A refresh credential that does not exist (malformed/expired/unknown):
-/// the catalogue 401 `invalid-refresh-token` — the generic 500 never
-/// hides the contract (FR-008).
+/// A renewal credential that resolves to nothing (unknown, malformed, of
+/// another shape): the contract's LISTED PAIR of slugs decides by the
+/// flavor of the stack — the modern goTruth (the encryptd refresh tokens)
+/// validates the shape of ANY credential and answers the 422 that the
+/// client maps to the bad-request 400; the legacy (the opaque 22-char
+/// tokens) answers at the grant (the 401 of invalid_grant → the
+/// invalid-refresh-token). Either way: a catalogue slug with its name,
+/// never the generic 500, never a plain text (FR-008).
 #[tokio::test]
-async fn the_unknown_refresh_token_answers_the_catalogue() {
+async fn an_invalid_refresh_credential_answers_a_catalogue_slug() {
     let Some(app) = app().await else {
         return;
     };
 
-    let response = call(
-        &app,
-        "POST",
-        "/v1/auth/refresh",
-        Some(serde_json::json!({ "refresh_token": format!("no-es-token-{}", new_request_id()) })),
-    )
-    .await;
+    for (name, token) in [
+        (
+            "the unknown of a well-formed shape",
+            uuid::Uuid::new_v4().to_string(),
+        ),
+        (
+            "the not-even-a-credential shape",
+            format!("no-es-una-credencial{}", new_request_id()),
+        ),
+    ] {
+        let response = call(
+            &app,
+            "POST",
+            "/v1/auth/refresh",
+            Some(serde_json::json!({ "refresh_token": token })),
+        )
+        .await;
 
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let body = json_of(response).await;
-    assert!(body["type"]
-        .as_str()
-        .is_some_and(|t| t.ends_with("invalid-refresh-token")));
+        assert!(
+            response.status() == StatusCode::BAD_REQUEST
+                || response.status() == StatusCode::UNAUTHORIZED,
+            "{name}: the catalog (400 modern / 401 legacy)"
+        );
+        let body = json_of(response).await;
+        assert!(
+            body["type"].as_str().is_some_and(|t| {
+                t.ends_with("bad-request") || t.ends_with("invalid-refresh-token")
+            }),
+            "{name}: the named slug of the catalogue, never the generic"
+        );
+    }
 }
 
 /// FR-009 end to end: the revoke of the session (204) kills the credential

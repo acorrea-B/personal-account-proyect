@@ -187,6 +187,12 @@ without running.
   (`SERVICE_ROLE_KEY` ← `SUPABASE_SERVICE_ROLE_KEY`) live in the harness, not
   in the app's config. A silently skipped test is NOT a green test — the
   "2 passed in 0.00s" was the trap.
+  3. The CI's export of the stack: the CLI's `status -o env` speaks ITS OWN
+     vocabulary (`api.url`, `auth.*_key` — the setup-cli docs) — mapping the
+     guessed names with a grep never worked (nothing consumed them while the
+     tier was dead). The `--override-name` binds them to the app's names in
+     ONE pass, in every job. THE EXPORT NEVER WAS PROVEN LIVE UNTIL THE
+     FIRST TEST CONSUMED THE VARS.
 - **Evidence**: the guard really running against the local `pap` stack: 2/2
   integration ok in 0.05s (2026-10-23).
 
