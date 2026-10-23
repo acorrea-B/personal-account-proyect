@@ -25,8 +25,8 @@ provider "scaleway" {
 }
 
 locals {
-  # Variables no secretas del namespace, heredadas por las funciones
-  # (`ENV` distingue el entorno; los secrets van por fuera del pipeline).
+  # Variables no secretas de la función (el namespace las hereda). Las
+  # credenciales van declaradas aparte, abajo, como secret_environment_variables.
   function_environment = {
     ENV                          = var.stage
     ALLOWED_ORIGINS              = var.allowed_origins
@@ -39,6 +39,8 @@ locals {
     RATE_LIMIT_REQUEST_PER_MIN   = var.rate_limit_request_per_min
     CV_MAX_BYTES                 = var.cv_max_bytes
     CV_VERSIONS_RETENTION        = var.cv_versions_retention
+    SUPABASE_URL                 = var.supabase_url
+    SUPABASE_JWT_ISSUER          = var.supabase_jwt_issuer
   }
 
   # Etiquetas de los recursos (buena práctica de infra: costo, filtrado y
@@ -59,9 +61,11 @@ resource "scaleway_function_namespace" "perfil" {
   tags                  = local.function_tags
 }
 
-# La función `api` en sí. Sin secret_environment_variables declaradas a
-# propósito: Terraform no gestiona (ni borra) los secrets adjuntados en la
-# consola / con SOPS.
+# La función `api` con sus credenciales DECLARADAS (revisión de D16 — el
+# hallazgo del primer deploy: el PUT del provider borraba los secrets
+# adjuntados a mano en la consola; declarados, el PUT los lleva siempre).
+# Los valores viajan cifrados como secrets de GitHub y el state guarda los
+# hashes — nunca el repo ni los logs.
 resource "scaleway_function" "api" {
   namespace_id = scaleway_function_namespace.perfil.id
   name         = "api"
@@ -79,6 +83,14 @@ resource "scaleway_function" "api" {
 
   zip_file = "${path.module}/function.zip"
   zip_hash = filesha256("${path.module}/function.zip")
+
+  # Credenciales de la función (sensitive: el plan y los logs las enmascaran).
+  secret_environment_variables = {
+    DATABASE_URL             = var.database_url
+    SUPABASE_JWT_SECRET      = var.supabase_jwt_secret
+    SERVICE_ROLE_KEY         = var.service_role_key
+    SUPABASE_PUBLISHABLE_KEY = var.supabase_publishable_key
+  }
 
   tags = local.function_tags
 }

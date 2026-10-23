@@ -3,11 +3,12 @@
 # Configuración y no credencial, PERO el repo es público y GitHub solo
 # enmascara secrets en los logs — viaja como secrets.SCW_PROJECT_ID.
 #
-# Las variables no secretas de la función vienen de los `vars` del
-# environment de GitHub y conservan los mismos defaults que tenía el
-# serverless.yml. Los secrets NUNCA pasan por aquí (plan §12.2): se adjuntan
-# fuera del pipeline como secret_environment_variables, y Terraform no los
-# declara — no los toca.
+# REVISIÓN DE D16 (hallazgo del primer deploy): el PUT del provider sobrescribe
+# los secret_environment_variables adjuntados a mano fuera del pipeline — la
+# consola pierde las variables en cada deploy. Declararlas acá es el plan B
+# sancionado por §12.2 ("o Terraform con SOPS" — aquí su versión simple: los
+# valores viajan cifrados como secrets de GitHub, nunca en el repo ni en los
+# logs; el state remoto guarda los hashes, no los valores).
 
 variable "scw_project_id" {
   description = "Project ID de Scaleway (consola: Project management)."
@@ -91,4 +92,39 @@ variable "cv_versions_retention" {
   description = "Cantidad de versiones del CV que se retienen."
   type        = string
   default     = "10"
+}
+# --- Credentials of the function (D16 revised: declared, not console-attached) ---
+
+variable "database_url" {
+  description = "Postgres of Supabase for the API (transaction pooler, port 6543)."
+  type        = string
+  sensitive   = true
+}
+
+variable "supabase_url" {
+  description = "Endpoint of the Supabase project (Auth admin)."
+  type        = string
+}
+
+variable "supabase_jwt_secret" {
+  description = "HS256 secret that signs the JWTs of Supabase Auth."
+  type        = string
+  sensitive   = true
+}
+
+variable "service_role_key" {
+  description = "Key with the service role (the admin API, R8)."
+  type        = string
+  sensitive   = true
+}
+
+variable "supabase_publishable_key" {
+  description = "Publishable key of the new key system of Supabase."
+  type        = string
+  sensitive   = true
+}
+
+variable "supabase_jwt_issuer" {
+  description = "Issuer to enforce in the credentials (cloud: https://<ref>.supabase.co/auth/v1)."
+  type        = string
 }
