@@ -76,6 +76,14 @@ fn load_env_files() {
         }
     }
 
+    // The CV-write limit of the TEST process (R2): the retention suites
+    // chain dozens of replacements inside ONE window — the R2 cap exists
+    // for the clients' traffic, not for the fixtures. The env (local or
+    // the CI's vars) keeps the word; here only the default lands.
+    if std::env::var("RATE_LIMIT_CV_WRITE_PER_MIN").is_err() {
+        std::env::set_var("RATE_LIMIT_CV_WRITE_PER_MIN", "10000");
+    }
+
     // The JWKS URL derives from the base when it does not travel — the
     // ending rule again: the auth-v1-rooted base is the raw gotrue; the
     // platform base gains the gateway prefix.
