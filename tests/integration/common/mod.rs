@@ -14,10 +14,16 @@ use axum::http::Request;
 use tower::ServiceExt;
 
 /// Loads the dotenv files (the envs of the process always win): `.env` of
-/// the repo first, `.env.test` of the local stack after (the latter is the
-/// one of the tests).
+/// the repo and `.env.test` of the local stack (the latter is the one of
+/// the tests).
+///
+/// The merge resolves BY LAST WRITE: `.env.test` over `.env` — the bug of
+/// the first write (set-if-absent, `.env` first) let the cloud pooler of
+/// `.env` win and the locality guard failed: all the integration tests
+/// skipped silently (there and in the CI, which does not export
+/// `SERVICE_ROLE_KEY` anyway).
 fn load_env_files() {
-    // Later files win over the earlier ones (the test stack has priority).
+    let mut values = std::collections::HashMap::new();
     for file in [".env", ".env.test"] {
         let Ok(content) = std::fs::read_to_string(file) else {
             continue;
@@ -27,10 +33,38 @@ fn load_env_files() {
                 continue;
             }
             if let Some((key, value)) = line.split_once('=') {
-                if std::env::var(key).is_err() {
-                    std::env::set_var(key, value.trim());
-                }
+                values.insert(key.to_string(), value.trim().to_string());
             }
+        }
+    }
+    // The process environment keeps the last word over every file.
+    for (key, value) in values {
+        if std::env::var(&key).is_err() {
+            std::env::set_var(key, value);
+        }
+    }
+
+    // The aliases of the platform: the CI exports the SUPABASE_* names and
+    // the config of the app reads SERVICE_ROLE_KEY — the alias makes the
+    // exported stack usable without touching the config (the harness is the
+    // adapter, R7's one vocabulary).
+    if std::env::var("SERVICE_ROLE_KEY").is_err() {
+        if let Ok(service) = std::env::var("SUPABASE_SERVICE_ROLE_KEY") {
+            std::env::set_var("SERVICE_ROLE_KEY", service);
+        }
+    }
+
+    // The JWKS URL derives from the base when it does not travel: the raw
+    // gotrue of the local stack of tests does not gate the path; the
+    // platform does.
+    if std::env::var("SUPABASE_JWKS_URL").is_err() {
+        if let Ok(base) = std::env::var("SUPABASE_URL") {
+            let path = if base.contains("127.0.0.1") || base.contains("localhost") {
+                "/.well-known/jwks.json"
+            } else {
+                "/auth/v1/.well-known/jwks.json"
+            };
+            std::env::set_var("SUPABASE_JWKS_URL", format!("{base}{path}"));
         }
     }
 }
