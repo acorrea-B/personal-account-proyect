@@ -393,4 +393,63 @@ Tabla canónica de status:
 - `cv:process` y endpoints de resultados de CV (requiere `processing_consent = true`, D15)
 - GDPR completo: export de datos de cuenta
 - **Era LLM (D15):** contabilidad de uso/quota-credits por usuario (los costos por token exigen cap por cuenta) · cola de jobs asíncronos con patrón 202 + job status para `cv:process` · embeddings/semántica vía pgvector en el mismo Supabase Postgres (match profesional avanzado)
+
+## 16. Plan de ejecución T011/T012 — register (US1) + arranque con prueba de DB
+
+**Estado del árbol**: T001-T010 hechas (foundations, §8). Faltan 16 tareas; esta fase cubre 3 (T011/T012/T013 del MVP de US1) + la ampliación operativa que el operador pidió.
+
+### 16.1 Modelo de conexiones serverless (insumo del operador)
+
+Las funciones abren/cierran conexiones por cold start — nada del pool es estable como un
+servidor 24/7: el pool interno de la instancia muere con ella a cada scale-down. Dos
+consecuencias operativas:
+
+1. **Prueba de conexión al arranque** (§16.2): un ping `SELECT 1` en `AppState::build`
+   loggea la viabilidad del pooler en cada cold start — es la señal barata de que la BD
+   funciona *antes* del primer request real.
+2. **Pooler transacción (6543) para el API** — diferido al cierre de este ciclo: cada
+   conexión del pool en modo sesión (5432) mantiene una sesión pegada a Supabase por la
+   vida de la instancia; el modo transacción libera por transacción. Es cambio de secret
+   de producción (GitHub env), sin cambio de código. El `DATABASE_URL` de migraciones
+   (5432, modo sesión) queda como está.
+
+### 16.2 Ampliación: ping de arranque en `AppState::build`
+
+- Tras `PgPoolOptions::connect_lazy`: un `SELECT 1` acotado (timeout constante de 10s en
+  `state.rs` — sin variable nueva de config, el arranque no es un SLA negociable).
+- Éxito → `tracing::info!` con latencia y `db_max_connections` — el log de arranque
+  pedido (§5 del runbook: "la conexión a la BD fue exitosa").
+- Fallo → `tracing::error!` + falla el cold start (`StartupError::Database`): un 500
+  temprano con causa en el log mejor que un error tardío por request (decisión del
+  operador pedida por defecto).
+
+### 16.3 T012 (implementación) — `src/domain/auth/`
+
+- `dto.rs`: `RegisterRequest` (validator: email formato, contraseña política R4) +
+  `RegisterResponse` + `ResendRequest` — respeta la regla ≤2 structs por archivo
+  (división en archivos separados si hace falta).
+- `handlers.rs`: `register` — normalize email (trim+lowercase, FR-002) ANTES de validar;
+  `signup` vía cliente T008; mapeo de errores de Supabase → catálogo: `user_exists` →
+  409 `email-exists` (case-insensitive), `weak_password` → 422 con requirements, red/5xx
+  → 503 (cuenta creada sin email — el resend cubre); 201 `{user}` sin credenciales
+  (FR-003) + emisión `auth.registered` (T009) — register NO crea el perfil espejo
+  (FR-004: trigger T003).
+- `resend_verification`: respuesta genérica SIEMPRE (FR-006) + emisión
+  `auth.verification_sent`.
+- Wiring en `router.rs`: register y resend pasan del stub al dominio — login/refresh/
+  revoke siguen stub hasta T014/T015.
+
+### 16.4 T011 (tests, red→green): `tests/integration/register.rs`
+
+201 sin tokens (FR-003) · email normalizado en respuesta y BD (FR-002) · `email-exists`
+409 case-insensitive · `email-malformed` 422 · `weak-password` 422 con requirements ·
+reenvío genérico 200 · login pre-verificación → 403 `email-not-verified` con
+`can_resend: true` · perfil creado tras verificar (FR-004; T013 lo completa).
+
+### 16.5 Entrega (ramas apiladas, ≤6 archivos, pausa de revisión por PR)
+
+1. **PR-1** `feature/T012-startup-db-ping`: §16.2 (`state.rs`)
+2. **PR-2** `feature/T012-register-handlers`: §16.3 (+ dto tests unitarios)
+3. **PR-3** `feature/T011-register-tests`: §16.4
+4. **Operación** (con el operador): `DATABASE_URL` de prod → pooler transacción 6543.
 - **Auditoría persistente (D18):** tabla `audit_events` consultable desde la app (sobrevive a rotación de logs) — aditiva: escribe con el mismo envelope/taxonomía definidos en §13.5

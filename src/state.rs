@@ -34,13 +34,27 @@ pub struct AppState {
 impl AppState {
     /// Builds the state: connection pool + Supabase credentials.
     ///
-    /// Fails fast when the database is unreachable (Principle III).
+    /// Fails fast when the database is unreachable (Principle III) — the
+    /// eager `connect` IS the startup probe: the first physical connection
+    /// opens here or the cold start fails (`StartupError::Database`).
     pub async fn build(config: &Config) -> Result<Self, sqlx::Error> {
+        let started = std::time::Instant::now();
         let pool = PgPoolOptions::new()
             .max_connections(config.db_max_connections)
             .acquire_timeout(config.db_acquire_timeout)
             .connect(&config.database_url)
             .await?;
+
+        // The startup log of the connection (operator's request, plan §16.2):
+        // a function instance opens and closes its connections — this line
+        // proves the pooler answered BEFORE the first real request; the
+        // failure of this path travels one step up as `StartupError` and
+        // `lib.rs` names it in the ERROR log of the cold start.
+        tracing::info!(
+            latency_ms = started.elapsed().as_millis() as u64,
+            db_max_connections = config.db_max_connections,
+            "the database pool responds — the startup connection succeeded"
+        );
 
         Ok(Self {
             pool,
