@@ -165,8 +165,16 @@ fn cors_layer(config: &Config) -> CorsLayer {
 /// Initializes the tracing subscriber: JSON in the deployed environments,
 /// human readable in development.
 ///
-/// The subscriber is global and can only be installed once, so a second call
-/// (another instance of the process, a test) is ignored instead of panicking.
+/// The events travel by stderr: unbuffered (the stdout of Rust waits in its
+/// buffer until the line or the 8 KiB, and in a container with idle instance
+/// the buffer can never fill) and it is the channel the runtime wrapper of
+/// the platform reads.
+///
+/// The subscriber is global and can only be installed once: if another one
+/// already exists (the runtime wrapper can install its own to speak with
+/// the platform), the failure is NOT swallowed — the reason travels by
+/// stderr directly, because while the subscriber is missing no log of the
+/// app exists.
 fn init_tracing(config: &Config) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -174,12 +182,22 @@ fn init_tracing(config: &Config) {
         .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,reqwest=warn"));
 
     let registry = tracing_subscriber::registry().with(filter);
-    if config.env == "development" {
-        let _ = registry.with(fmt::layer().with_target(true)).try_init();
+    let installed = if config.env == "development" {
+        registry
+            .with(fmt::layer().with_target(true).with_writer(std::io::stderr))
+            .try_init()
     } else {
-        let _ = registry
-            .with(fmt::layer().json().with_target(true))
-            .try_init();
+        registry
+            .with(
+                fmt::layer()
+                    .json()
+                    .with_target(true)
+                    .with_writer(std::io::stderr),
+            )
+            .try_init()
+    };
+    if let Err(err) = installed {
+        eprintln!("the tracing subscriber could not install: {err}");
     }
 }
 
