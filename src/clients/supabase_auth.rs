@@ -19,17 +19,19 @@ use uuid::Uuid;
 
 use crate::errors::ApiError;
 
-/// The retry profile of the endpoint (R7, sharpened by the CI's coverage
-/// of the T021 branch: a network/5xx RETRY of a mutating call whose first
-/// attempt LANDED double-applies the side effect — the account cloned
-/// (the CI's 409 on a fresh email), the FR-008's rotation reading as
-/// reuse, the email window spent).
+/// The retry profile of the endpoint (R7, sharpened twice by the CI):
+/// the LOSS of the answer is the only unknown that double-applies — the
+/// 5xx RESPONSES arrive and their goTruth shape precedes the commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Retry {
-    /// Retries the acotated network/5xx failures (R7).
+    /// Retries BOTH: the acotated network failures AND the 5xx (the
+    /// idempotent reads and the logout).
     Bounded,
-    /// NEVER retries: the unknown outcome answers the contract's
-    /// dependency-unavailable — the honest unknown.
+    /// Retries the 5xx responses (their outcome is KNOWN — they precede
+    /// the commit) but NEVER the network failure: the lost answer may
+    /// have LANDED, and the retry would double the side effect (the
+    /// CI's 409-on-fresh-email, the FR-008's rotation reading as reuse,
+    /// the email window). The unknown = the contract's 503.
     Mutating,
 }
 
@@ -297,11 +299,13 @@ impl SupabaseAuthClient {
 
             match request.send().await {
                 Err(err) => {
-                    // The network failure: retriable ONLY in the bounded
-                    // profile — in the mutating one the first attempt may
-                    // have LANDED (the account clones, the FR-008's
-                    // rotation reads as reuse, the email window spends):
-                    // the contract's unknown = the dependency's 503.
+                    // The network failure: NEVER retried in the mutating
+                    // profile — the attempt may have LANDED (the response
+                    // was lost, the outcome unknown: the account clones,
+                    // the FR-008's rotation reads as reuse, the email
+                    // window spends). The unknown = the 503 (the CI's
+                    // 409-on-fresh-email traced here). The bounded one
+                    // retries acotado (the idempotent reads).
                     if retry == Retry::Mutating || attempt == self.retries {
                         tracing::warn!(error = %err, "Supabase did not answer");
                         return Err(ApiError::DependencyUnavailable);
@@ -311,10 +315,12 @@ impl SupabaseAuthClient {
                 Ok(response) => {
                     let status = response.status();
                     if status.as_u16() >= 500 {
-                        // Transient of Supabase: retriable but acotado (R7)
-                        // — the mutating profile never retries (the same
-                        // unknown-outcome hazard the network failure has).
-                        if retry == Retry::Mutating || attempt == self.retries {
+                        // A 5xx RESPONSE arrives — the outcome is KNOWN:
+                        // goTruth answered and its 5xx precedes the commit
+                        // (the busy transactions, the timeouts of its
+                        // schema queries — never a partial). Retriable in
+                        // BOTH profiles with the R7 acotation.
+                        if attempt == self.retries {
                             return Err(ApiError::DependencyUnavailable);
                         }
                         tokio::time::sleep(backoff(attempt)).await;
@@ -938,14 +944,14 @@ mod tests {
         );
     }
 
-    /// The 5xx of a MUTATING call never retries either (the same
-    /// unknown-outcome hazard: a gateway 504 can answer AFTER the upstream
-    /// committed — the retry would double the side effect).
+    /// The 5xx RESPONSE of a mutating call retries BOUNDED (the outcome
+    /// is KNOWN — goTruth answered, and its 5xx precedes the commit: no
+    /// side effect landed to double). The exhaustion lands the 503.
     #[tokio::test]
-    async fn the_mutating_5xx_answers_the_dependency_without_retry() {
+    async fn the_mutating_5xx_retries_bounded_without_double_apply() {
         let (base, hits, _seen) = canned(move |_| {
             problem(
-                StatusCode::from_u16(503).expect("valid"),
+                StatusCode::from_u16(500).expect("valid"),
                 serde_json::json!({}),
             )
         })
@@ -961,11 +967,9 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.slug(), "dependency-unavailable");
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            1,
-            "no retry on the mutating 5xx"
-        );
+        // The initial + the 2 acotated retries of R7 — the response
+        // arrived every time, so none of the attempts could have LANDED.
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
     }
 
     /// An error document WITHOUT a recognized shape (either dialect): the

@@ -25,12 +25,16 @@ pub(crate) mod test_support {
 
     /// The pool of the local DB of tests (Supabase local — §12.3): the
     /// migrations of T003 applied with idempotence. `None`: no local DB —
-    /// the test is skipped instead of failing (the CI always has it).
+    /// the test is skipped instead of failing (the CI always has it); the
+    /// SKIPPED here tells why (the tests' guards answer silent).
     ///
     /// Guard against the cloud: the tests NEVER run against the project
     /// real (the database of tests is only local).
     pub async fn pool() -> Option<PgPool> {
-        let url = std::env::var("DATABASE_URL").ok()?;
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipped: no local DATABASE_URL (supabase start)");
+            return None;
+        };
         let local = ["localhost", "127.0.0.1"]
             .iter()
             .any(|host| url.contains(host));

@@ -4,6 +4,7 @@
 mod auth_ratelimit;
 mod common;
 mod cv_flow;
+mod cv_versions_retention;
 mod profile_flow;
 mod profile_mirror;
 mod register;

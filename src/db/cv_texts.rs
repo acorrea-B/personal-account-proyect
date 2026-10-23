@@ -6,7 +6,6 @@
 //! UPDATE` on the live row): in disagreement nothing is archived nor
 //! overwritten — `stale-version` with the current version.
 
-use chrono::Timelike;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -99,14 +98,10 @@ pub async fn save(
         // travels truncated to seconds in the responses — the client can
         // only quote what it read, so the comparison matches the SAME
         // precision (the exact-grain compare would fail ALWAYS).
-        if live.as_ref().is_some_and(|live| {
-            let live = live
-                .updated_at
-                .with_nanosecond(0)
-                .unwrap_or(live.updated_at);
-            let expected = expected.with_nanosecond(0).unwrap_or(expected);
-            live != expected
-        }) {
+        if live
+            .as_ref()
+            .is_some_and(|live| live.updated_at.timestamp() != expected.timestamp())
+        {
             // Nothing was written: the tx rolls back on the return.
             return Err(RepoError::Stale(live.expect("locked above").updated_at));
         }
@@ -235,7 +230,6 @@ mod tests {
     #[tokio::test]
     async fn the_first_save_upserts_without_archive() {
         let Some(pool) = crate::db::test_support::pool().await else {
-            eprintln!("skipped: no local DATABASE_URL (supabase start)");
             return;
         };
         let user = crate::db::test_support::create_user(&pool).await;
@@ -268,7 +262,6 @@ mod tests {
     #[tokio::test]
     async fn the_retention_keeps_ten_versions() {
         let Some(pool) = crate::db::test_support::pool().await else {
-            eprintln!("skipped: no local DATABASE_URL (supabase start)");
             return;
         };
         let user = crate::db::test_support::create_user(&pool).await;
@@ -297,7 +290,6 @@ mod tests {
     #[tokio::test]
     async fn the_stale_version_blocks_and_writes_nothing() {
         let Some(pool) = crate::db::test_support::pool().await else {
-            eprintln!("skipped: no local DATABASE_URL (supabase start)");
             return;
         };
         let user = crate::db::test_support::create_user(&pool).await;
@@ -329,7 +321,6 @@ mod tests {
     #[tokio::test]
     async fn the_queries_never_cross_users() {
         let Some(pool) = crate::db::test_support::pool().await else {
-            eprintln!("skipped: no local DATABASE_URL (supabase start)");
             return;
         };
         let alice = crate::db::test_support::create_user(&pool).await;
@@ -349,7 +340,6 @@ mod tests {
     #[tokio::test]
     async fn the_history_lists_and_the_version_reads_within_the_user() {
         let Some(pool) = crate::db::test_support::pool().await else {
-            eprintln!("skipped: no local DATABASE_URL (supabase start)");
             return;
         };
         let alice = crate::db::test_support::create_user(&pool).await;
@@ -380,5 +370,65 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// The atomic EVERYTHING-OR-NOTHING (ADR 0013) proven against a REAL
+    /// failure: a content breaching the schema's CHECK (octet_length > the
+    /// 51200 backstop, T003) fails the upsert IN the tx — the archive and
+    /// the upsert roll back WHOLE: no live row, no half archive.
+    #[tokio::test]
+    async fn the_check_breach_of_the_schema_rolls_the_whole_save_back() {
+        let Some(pool) = crate::db::test_support::pool().await else {
+            return;
+        };
+        let user = crate::db::test_support::create_user(&pool).await;
+        save(&pool, user, "CV vigente", "req-5", None, 10)
+            .await
+            .unwrap();
+
+        // The tx forces the failure (the archive SUCCEEDED, the upsert
+        // breaches the CHECK): the whole tx must roll back — the previous
+        // content stays live and NO second archive lands.
+        let breaching = "x".repeat(51201);
+        let outcome = save(&pool, user, &breaching, "req-5", None, 10).await;
+        assert!(
+            matches!(outcome, Err(RepoError::Sql(_))),
+            "the CHECK of the schema answers the Sql of the repo"
+        );
+        let live = get(&pool, user).await.unwrap().expect("the live row");
+        assert_eq!(live.content, "CV vigente", "nothing overwrote");
+        let archived: i64 =
+            sqlx::query_scalar("select count(*) from cv_versions where user_id = $1")
+                .bind(user)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(archived, 0, "the archive of the failed tx rolled back");
+    }
+
+    /// The repository's error face: a POOL whose postgres never answers
+    /// (lazy, a dead port) maps every Sql into the RepoError::Sql — the
+    /// handlers turn it into the catalogue's 503.
+    #[tokio::test]
+    async fn the_dead_pool_maps_every_sql_to_the_repo_error() {
+        let dead = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(500))
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/postgres")
+            .expect("the lazy pool takes any valid url");
+
+        let user = Uuid::new_v4();
+        assert!(matches!(get(&dead, user).await, Err(RepoError::Sql(_))));
+        assert!(matches!(
+            save(&dead, user, "x", "req-6", None, 10).await,
+            Err(RepoError::Sql(_))
+        ));
+        assert!(matches!(
+            list_versions(&dead, user, 10).await,
+            Err(RepoError::Sql(_))
+        ));
+        assert!(matches!(
+            version(&dead, user, Uuid::new_v4()).await,
+            Err(RepoError::Sql(_))
+        ));
     }
 }

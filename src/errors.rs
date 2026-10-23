@@ -363,6 +363,27 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
 
+    /// The direct `IntoResponse` of the ApiError (without the Problem's
+    /// `.on()` route): the bare handler's shortcut renders the canonical
+    /// problem too — status and content-type of the contract.
+    #[tokio::test]
+    async fn the_bare_api_error_renders_the_canonical_problem() {
+        let response = ApiError::EmailExists.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|content_type| content_type == "application/problem+json"));
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("complete");
+        let document: Value = serde_json::from_slice(&body).expect("problem JSON");
+        assert!(document["type"]
+            .as_str()
+            .is_some_and(|t| t.ends_with("email-exists")));
+    }
+
     /// Body of a problem answer as JSON, for the assertions of the fields.
     async fn document(error: ApiError) -> Value {
         let response = Problem::new(error).into_response();
