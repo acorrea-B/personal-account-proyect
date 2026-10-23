@@ -47,8 +47,14 @@ async fn stub_public_503() -> Problem {
     Problem::new(ApiError::DependencyUnavailable)
 }
 
-/// The stub of the version route (its `id` is a parameter).
-async fn stub_version_503(_version_id: axum::extract::Path<String>) -> Problem {
+/// The stub of the version route (its `id` is a parameter). The
+/// `AuthenticatedUser` extractor goes FIRST: a handler without it is
+/// anonymous even nested in this router — the wiring test caught the hole
+/// (the version route answered 503 without credential).
+async fn stub_version_503(
+    _user: AuthenticatedUser,
+    _version_id: axum::extract::Path<String>,
+) -> Problem {
     Problem::new(ApiError::DependencyUnavailable)
 }
 

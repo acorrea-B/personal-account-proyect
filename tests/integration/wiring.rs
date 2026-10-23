@@ -15,22 +15,35 @@ async fn the_public_routes_answer_503_from_the_stub() {
         return;
     };
 
-    for (method, path) in [
-        ("POST", "/v1/auth/register"),
-        ("POST", "/v1/auth/login"),
-        ("POST", "/v1/auth/refresh"),
-        ("POST", "/v1/auth/resend-verification"),
+    for (method, path, status) in [
+        // The real handlers of T012: the empty JSON is not the request
+        // shape of the DTOs (the required fields are missing) — the
+        // rejection of the extractor is the 400 canonical.
+        ("POST", "/v1/auth/register", StatusCode::BAD_REQUEST),
+        (
+            "POST",
+            "/v1/auth/resend-verification",
+            StatusCode::BAD_REQUEST,
+        ),
+        // login/refresh stay stubs (T015 wires them): the 503 canonical.
+        ("POST", "/v1/auth/login", StatusCode::SERVICE_UNAVAILABLE),
+        ("POST", "/v1/auth/refresh", StatusCode::SERVICE_UNAVAILABLE),
     ] {
         let response = call(&app, method, path, Some(serde_json::json!({}))).await;
         assert_eq!(
             response.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
+            status,
             "{method} {path} must exist in the router"
         );
-        let document = json_of(response).await;
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
         assert_eq!(
-            document["type"], "https://api.example.com/errors/dependency-unavailable",
-            "{method} {path} must answer the canonical stub"
+            content_type, "application/problem+json",
+            "{method} {path} must answer the canonical problem"
         );
     }
 
