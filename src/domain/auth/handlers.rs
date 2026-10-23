@@ -612,6 +612,66 @@ mod tests {
         assert!(password_policy("12345678").is_err());
     }
 
+    /// The pass-through arms of the flows: the client's OWN catalogue
+    /// errors (not the validation cut) travel with their problem verbatim —
+    /// the resend's `email-malformed` (rejected by Supabase itself), the
+    /// login's 429 and the refresh's real dependency 503.
+    #[tokio::test]
+    async fn the_resend_of_an_email_rejected_by_the_platform_answers_the_422() {
+        let (state, fake) = test_state().await;
+        set_response(
+            &fake,
+            400,
+            r#"{"error_code": "validation_failed", "msg": "Unable to validate email"}"#,
+        );
+
+        let response = resend_verification(
+            State(state.clone()),
+            HeaderMap::new(),
+            Ok(Json(ResendRequest {
+                email: "borrado-supabase@ejemplo.test".to_string(),
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body_of(response).await["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("email-malformed"));
+    }
+
+    #[tokio::test]
+    async fn the_login_of_a_rate_limited_flow_answers_the_429_with_retry_after() {
+        let (state, fake) = test_state().await;
+        set_response(
+            &fake,
+            429,
+            r#"{"error_code": "over_request_rate_limit", "msg": "Rate limit exceeded"}"#,
+        );
+
+        let (status, body) = login_of(&state, "juan@example.com", "contraseña1").await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(body["type"].as_str().expect("type").ends_with("rate-limited"));
+        assert!(body["retry_after_seconds"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[tokio::test]
+    async fn the_refresh_of_a_dead_dependency_answers_the_503() {
+        let (state, fake) = test_state().await;
+        set_response(
+            &fake,
+            502,
+            r#"{"error": "upstream", "error_description": "the platform is down"}"#,
+        );
+
+        let (status, body) = refresh_of(&state, "the-token").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("dependency-unavailable"));
+    }
+
     /// The session answer the fake token grant carries: the pair + TTL +
     /// the confirmed user (verified true — the login of the confirmation).
     const TOKEN_BODY: &str = r#"{

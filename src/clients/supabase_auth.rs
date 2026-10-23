@@ -661,4 +661,198 @@ mod tests {
             )
         );
     }
+
+    /// The LEGACY dialect maps the SAME catalogue (the failed login of
+    /// `invalid_grant` → the identical 401 of SC-004).
+    #[tokio::test]
+    async fn the_legacy_dialect_of_the_failed_login_maps_the_catalogue() {
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::from_u16(400).expect("valid"),
+                serde_json::json!({
+                    "error": "invalid_grant", "error_description": "Invalid login credentials"
+                }),
+            )
+        })
+        .await;
+        let result = client(&base)
+            .sign_in_with_password("user@mail.com", "Passw0rd1")
+            .await;
+        assert_eq!(result.unwrap_err().slug(), "invalid-credentials");
+    }
+
+    /// The legacy `Email not confirmed` (inside `invalid_grant`):
+    /// `email-not-verified` — the 403 of the gate, not the generic 401.
+    #[tokio::test]
+    async fn the_legacy_dialect_distinguishes_the_not_confirmed_email() {
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::from_u16(400).expect("valid"),
+                serde_json::json!({
+                    "error": "invalid_grant", "error_description": "Email not confirmed"
+                }),
+            )
+        })
+        .await;
+        let result = client(&base)
+            .sign_in_with_password("user@mail.com", "Passw0rd1")
+            .await;
+        assert_eq!(result.unwrap_err().slug(), "email-not-verified");
+    }
+
+    /// The legacy renewal: the reuse ("Already Used") and the absence —
+    /// the two reasons closed of the renewal, out of the SAME `invalid_grant`.
+    #[tokio::test]
+    async fn the_legacy_dialect_of_the_renewal_maps_the_two_reasons() {
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::from_u16(400).expect("valid"),
+                serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "Invalid Refresh Token: Already Used"
+                }),
+            )
+        })
+        .await;
+        let result = client(&base).refresh("the-reused").await;
+        assert_eq!(result.unwrap_err().slug(), "refresh-token-reused");
+
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::from_u16(400).expect("valid"),
+                serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "Invalid Refresh Token: Refresh Token Not Found"
+                }),
+            )
+        })
+        .await;
+        let result = client(&base).refresh("the-unknown").await;
+        assert_eq!(result.unwrap_err().slug(), "invalid-refresh-token");
+    }
+
+    /// The legacy signup: the duplicate (`user_already_registered`) and the
+    /// weak password — the register's 409/422 of the catalogue.
+    #[tokio::test]
+    async fn the_legacy_dialect_of_the_signup_maps_the_register_errors() {
+        for (body, slug) in [
+            (
+                serde_json::json!({
+                    "error": "user_already_registered", "error_description": "User already registered"
+                }),
+                "email-exists",
+            ),
+            (
+                serde_json::json!({
+                    "error": "weak_password", "error_description": "Password should be at least 6 characters."
+                }),
+                "weak-password",
+            ),
+            (
+                serde_json::json!({
+                    "error": "validation_failed", "error_description": "Unable to validate email address"
+                }),
+                "email-malformed",
+            ),
+        ] {
+            let (base, _hits, _seen) = canned(move |_| {
+                problem(StatusCode::from_u16(400).expect("valid"), body.clone())
+            })
+            .await;
+            let result = client(&base).signup("user@mail.com", "Passw0rd1").await;
+            assert_eq!(result.unwrap_err().slug(), slug);
+        }
+    }
+
+    /// The modern rate limit (the two names of goTruth) → `rate-limited`
+    /// with the Retry-After of the catalogue.
+    #[tokio::test]
+    async fn the_rate_limit_of_the_modern_shape_maps_with_retry_after() {
+        for name in ["over_request_rate_limit", "over_email_send_rate_limit"] {
+            let (base, _hits, _seen) = canned(move |_| {
+                problem(
+                    StatusCode::from_u16(429).expect("valid"),
+                    serde_json::json!({ "code": 429, "error_code": name, "msg": "rate-limited" }),
+                )
+            })
+            .await;
+            let result = client(&base)
+                .sign_in_with_password("user@mail.com", "Passw0rd1")
+                .await;
+            assert_eq!(result.unwrap_err().slug(), "rate-limited");
+        }
+    }
+
+    /// An error document WITHOUT a recognized shape (either dialect): the
+    /// generic internal with the warn of the log (§13.4).
+    #[tokio::test]
+    async fn an_error_without_shape_resolves_internal() {
+        let (base, _hits, _seen) =
+            canned(move |_| problem(StatusCode::from_u16(400).expect("valid"), serde_json::json!({})))
+                .await;
+        let result = client(&base)
+            .sign_in_with_password("user@mail.com", "Passw0rd1")
+            .await;
+        assert_eq!(result.unwrap_err().slug(), "internal");
+    }
+
+    /// The unreachable Supabase (the network dead): the retries of R7
+    /// exhaust and the `dependency-unavailable` ends the call (never an
+    /// internal, never a credential).
+    #[tokio::test]
+    async fn the_unreachable_supabase_ends_in_dependency_unavailable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the ephemeral port opens");
+        let address = listener.local_addr().expect("the bind keeps it");
+        drop(listener);
+
+        let result = client(&format!("http://{address}"))
+            .sign_in_with_password("user@mail.com", "Passw0rd1")
+            .await;
+        assert_eq!(result.unwrap_err().slug(), "dependency-unavailable");
+    }
+
+    /// The parse of the session: the legacy name of the confirmation
+    /// (`confirmed_at` — without the modern field) verifies too; the 200
+    /// WITHOUT the contract shape is a Supabase misconfiguration (internal,
+    /// never partial credentials — FR-003).
+    #[tokio::test]
+    async fn the_session_parse_holds_the_two_confirmation_names() {
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::OK,
+                serde_json::json!({
+                    "access_token": "the-access", "refresh_token": "the-refresh",
+                    "expires_in": 3600,
+                    "user": {
+                        "id": "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+                        "email": "user@mail.com",
+                        "confirmed_at": "2026-01-01T00:00:00Z",
+                        "created_at": "2026-01-01T00:00:00Z"
+                    }
+                }),
+            )
+        })
+        .await;
+        let session = client(&base)
+            .sign_in_with_password("user@mail.com", "Passw0rd1")
+            .await
+            .unwrap();
+        assert_eq!(session.verified, true, "the legacy name confirms too");
+
+        // The misconfiguration: a 200 without the shape (no tokens) —
+        // internal, never a half-session (FR-003 enforces).
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::OK,
+                serde_json::json!({ "message": "something else travels here" }),
+            )
+        })
+        .await;
+        let result = client(&base)
+            .sign_in_with_password("user@mail.com", "Passw0rd1")
+            .await;
+        assert_eq!(result.unwrap_err().slug(), "internal");
+    }
 }
