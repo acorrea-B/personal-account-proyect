@@ -2,5 +2,6 @@
 //! the modules are the user story suites (one per task).
 
 mod common;
+mod profile_mirror;
 mod session_flow;
 mod wiring;
