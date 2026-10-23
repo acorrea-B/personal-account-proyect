@@ -475,3 +475,17 @@ options with their costs:
 - **(c) An own revocations table** (new migration + a DB lookup per request):
   the worst serverless mix (the connection pool already pays; the migration
   is a new schema state).
+
+**The operator's ruling (2026-10-23)**: the rotation is MANDATORY — an open
+session is a stolen token and the free movement of a not-renewed credential
+for a prolonged time is unacceptable. The consequences accepted:
+
+1. FR-008 is enforced where the platform supports it: the reuse interval of
+   the test stack goes to 0 in the operator's compose
+   (`GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL=0`) — a stack that does not
+   enforce the single-use is a stack finding (learned.md), not a contract
+   relaxation.
+2. The protected flows carry the session check of (b): the signature filter
+   first (the garbage dies locally), then the session state of the credential
+   with a short cache — FR-009 and the "usuario eliminado → 401" edge share
+   the same mechanism. The `revoke` handler lands with it (T015's tail).
