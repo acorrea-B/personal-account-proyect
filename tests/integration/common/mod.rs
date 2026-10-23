@@ -206,6 +206,62 @@ pub async fn admin_create_user(verified: bool) -> TestUser {
     }
 }
 
+/// Fixture via the admin API (R8): confirm the email of AN EXISTING user
+/// (the UPDATE of `email_confirmed_at` — the trigger of the mirror
+/// T003/FR-004 fires on the update, not on the creation) — the second
+/// phase the mirror tests drive.
+pub async fn admin_confirm_user(user_id: &str) {
+    let base = std::env::var("SUPABASE_URL").expect("the guard checked it");
+    let service = std::env::var("SERVICE_ROLE_KEY").expect("the guard checked it");
+    let root = base.trim_end_matches('/');
+    let root = root.strip_suffix("/auth/v1").unwrap_or(root);
+    let url = if base.trim_end_matches('/').ends_with("/auth/v1") {
+        format!("{root}/admin/users/{user_id}") // raw gotrue
+    } else {
+        format!("{root}/auth/v1/admin/users/{user_id}") // the gateway
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .put(url)
+        .header("apikey", &service)
+        .header("authorization", format!("Bearer {service}"))
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({ "email_confirm": true }))
+        .send()
+        .await
+        .expect("the admin API answers");
+    assert!(
+        response.status().is_success(),
+        "the admin confirm of the fixture succeeds"
+    );
+}
+
+/// The pool of the LOCAL DB of the tests (the migrations applied with
+/// idempotence — the same `Migrator` the app runs): `None` = no local DB
+/// (the test skips instead of failing; the CI always has it). The guard of
+/// the cloud: NEVER against the project real.
+pub async fn db_pool() -> Option<sqlx::PgPool> {
+    load_env_files();
+    let url = std::env::var("DATABASE_URL").ok()?;
+    if !["localhost", "127.0.0.1"].iter().any(|host| url.contains(host)) {
+        tracing::warn!("the tests are skipped: DATABASE_URL is not local");
+        return None;
+    }
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(&url)
+        .await
+        .ok()?;
+
+    let migrations_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
+    let migrator = sqlx::migrate::Migrator::new(std::path::Path::new(migrations_dir))
+        .await
+        .ok()?;
+    migrator.run(&pool).await.ok()?;
+    Some(pool)
+}
+
 /// The login of a fixture email+password (the harness proves flows end to
 /// end); it answers the pair or the error code of Supabase. Unconsumed
 /// until its flow lands (T011+).

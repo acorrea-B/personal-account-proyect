@@ -3,4 +3,5 @@
 
 mod common;
 mod session_flow;
+mod profile_mirror;
 mod wiring;
