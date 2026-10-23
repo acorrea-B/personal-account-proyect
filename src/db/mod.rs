@@ -39,7 +39,14 @@ pub(crate) mod test_support {
             return None;
         }
 
+        // The pool of the test: TINY on purpose — every #[tokio::test]
+        // opens its OWN pool and the suites run in parallel: the default
+        // 10 connections per pool starves the shared local postgres (the
+        // goTruth of the same machine exhausts first — the CI's flakes of
+        // the T021 branch traced back to this). Two connections solve the
+        // whole test's work.
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
             .acquire_timeout(std::time::Duration::from_secs(5))
             .connect(&url)
             .await

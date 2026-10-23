@@ -4,18 +4,16 @@
 //! root router; the protected ones take the `AuthenticatedUser` extractor —
 //! any route missing from `PUBLIC_ROUTES` requires a valid credential.
 //!
-//! The 10 API handlers are still stubs that answer 503 (T010 wiring): the
-//! domains and their handlers land by user story (T011+) and replace each
-//! stub.
+//! All the handlers are wired over their domains (T012/T015 US1-2, T017
+//! US3, T021 US4): no stub remains — the 503 travels only from the real
+//! dependency failures.
 
 use axum::{
     routing::{get, post, put},
     Router,
 };
 
-use crate::domain::{auth, profile};
-use crate::errors::{ApiError, Problem};
-use crate::middleware::auth::AuthenticatedUser;
+use crate::domain::{auth, cv, profile};
 use crate::state::AppState;
 
 use auth::handlers;
@@ -35,37 +33,22 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// The stub of the protected routes until their handlers land (T012+): 503
-/// with the canonical document (the wiring test proves the route exists
-/// and the gate answered — not the handler logic).
-async fn stub_protected_503(_user: AuthenticatedUser) -> Problem {
-    Problem::new(ApiError::DependencyUnavailable)
-}
-
-/// The stub of the version route (its `id` is a parameter). The
-/// `AuthenticatedUser` extractor goes FIRST: a handler without it is
-/// anonymous even nested in this router — the wiring test caught the hole
-/// (the version route answered 503 without credential).
-async fn stub_version_503(
-    _user: AuthenticatedUser,
-    _version_id: axum::extract::Path<String>,
-) -> Problem {
-    Problem::new(ApiError::DependencyUnavailable)
-}
-
 pub fn build_router(state: AppState) -> Router {
     // Protected: every handler takes `AuthenticatedUser`, so an anonymous
     // request is rejected before reaching the handler (deny-by-default).
     let protected = Router::new()
         .route("/v1/auth/revoke", post(handlers::revoke))
-        // The profile flow (T018, US3) — the CV routes stay stubs until
-        // T021.
+        // The profile flow (T018, US3) and the CV flow (T021, US4): the
+        // five route groups of the contract — every handler takes the
+        // credential's user only (D3).
         .route("/v1/profile", get(profile::handlers::get_profile))
         .route("/v1/profile", put(profile::handlers::put_profile))
-        .route("/v1/cv/text", post(stub_protected_503))
-        .route("/v1/cv/text", get(stub_protected_503))
-        .route("/v1/cv/versions", get(stub_protected_503))
-        .route("/v1/cv/versions/{id}", get(stub_version_503))
+        .route(
+            "/v1/cv/text",
+            post(cv::handlers::post_text).get(cv::handlers::get_text),
+        )
+        .route("/v1/cv/versions", get(cv::handlers::list_versions))
+        .route("/v1/cv/versions/{id}", get(cv::handlers::get_version))
         .with_state(state.clone());
 
     Router::new()
