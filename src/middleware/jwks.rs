@@ -148,8 +148,14 @@ impl SignatureVerifier for JwksVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::State as AxumState;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    use axum::Router;
     use jsonwebtoken::{encode, EncodingKey, Header};
     use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     /// Fixture pair (EC P-256), inline by rule — the repository never
     /// carries a key file: this one is disposable (test-only, signs
@@ -174,6 +180,10 @@ mod tests {
     }"#;
 
     fn token(issuer: Option<&str>, aud: &str) -> String {
+        token_with_kid(Some("kid_test"), issuer, aud)
+    }
+
+    fn token_with_kid(kid: Option<&str>, issuer: Option<&str>, aud: &str) -> String {
         // The issuer absent travels without the key (the explicit null is
         // not the same credential shape as a missing claim).
         let mut claims = serde_json::json!({
@@ -185,11 +195,31 @@ mod tests {
             claims["iss"] = serde_json::Value::String(issuer.to_string());
         }
         let mut header = Header::new(Algorithm::ES256);
-        header.kid = Some("kid_test".to_string());
+        header.kid = kid.map(str::to_string);
         encode(
             &header,
             &claims,
             &EncodingKey::from_ec_pem(PRIV_PEM.as_bytes()).expect("the test key parses"),
+        )
+        .expect("the test token signs")
+    }
+
+    /// The secret of the symmetric fixtures: its base64url (without pad) is
+    /// the `k` of the oct keys of `oct_set`.
+    const SYMMETRIC_SECRET: &[u8] = b"jwks-test";
+
+    fn hs_token(aud: &str) -> String {
+        let claims = serde_json::json!({
+            "sub": "c0a8e1f2-33b4-4c5d-8e9f-a0b1c2d3e4f5",
+            "aud": aud,
+            "exp": 4_102_344_000_000_u64,
+        });
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some("kid_test".to_string());
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(SYMMETRIC_SECRET),
         )
         .expect("the test token signs")
     }
@@ -205,6 +235,81 @@ mod tests {
             "authenticated",
             Duration::from_secs(1),
         )
+    }
+
+    /// A set of one symmetric key (`oct`): `alg` optional — absent, the
+    /// key parameters decide the fallback (OctetKey → HS256).
+    fn oct_set(alg: Option<&str>) -> JwkSet {
+        let mut value = serde_json::json!({
+            "keys": [{
+                "kty": "oct",
+                "k": "andrcy10ZXN0",
+                "kid": "kid_test"
+            }]
+        });
+        if let Some(alg) = alg {
+            value["keys"][0]["alg"] = serde_json::Value::String(alg.to_owned());
+        }
+        serde_json::from_value(value).expect("the oct set parses")
+    }
+
+    /// The fake of the endpoint JWKS: a server in process (axum is already
+    /// a dependency of the API) on an ephemeral port. The mutable body and
+    /// status simulate the rotation (another `kid`) and the failures (500,
+    /// garbage); the hit counter proves that the cache avoids the refetch.
+    #[derive(Clone)]
+    struct FakeJwks {
+        response: Arc<Mutex<(u16, String)>>,
+        hits: Arc<AtomicUsize>,
+    }
+
+    impl FakeJwks {
+        fn set_response(&self, status: u16, body: &str) {
+            *self.response.lock().expect("the fake state never poisons") =
+                (status, body.to_string());
+        }
+
+        fn hits(&self) -> usize {
+            self.hits.load(Ordering::Relaxed)
+        }
+    }
+
+    async fn serve_jwks(AxumState(fake): AxumState<FakeJwks>) -> (StatusCode, String) {
+        fake.hits.fetch_add(1, Ordering::Relaxed);
+        let (status, body) = fake
+            .response
+            .lock()
+            .expect("the fake state never poisons")
+            .clone();
+        (
+            StatusCode::from_u16(status).expect("the fake status is valid"),
+            body,
+        )
+    }
+
+    async fn spawn_fake_jwks() -> (FakeJwks, String) {
+        let fake = FakeJwks {
+            response: Arc::new(Mutex::new((200, SET_JSON.to_string()))),
+            hits: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/jwks.json", get(serve_jwks))
+            .with_state(fake.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the ephemeral port opens");
+        let url = format!(
+            "http://{}/jwks.json",
+            listener.local_addr().expect("the bind keeps the address")
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("the fake serves") });
+        (fake, url)
+    }
+
+    /// A verifier against the network route (the unit tests of above use
+    /// only the synchronous core).
+    fn network_verifier(url: &str) -> JwksVerifier {
+        JwksVerifier::new(url, None, "authenticated", Duration::from_secs(1))
     }
 
     /// The accepted credential: signature + exp + aud, verified against
@@ -254,6 +359,128 @@ mod tests {
         assert!(matches!(
             verifier.verify_against(&token(None, "another_service"), &set()),
             Err(ApiError::Unauthorized { .. })
+        ));
+    }
+
+    /// A credential without `kid`: the verifier never guesses the key (401).
+    #[tokio::test]
+    async fn a_credential_without_kid_rejects() {
+        let verifier = verifier(None);
+        assert!(matches!(
+            verifier.verify_against(&token_with_kid(None, None, "authenticated"), &set()),
+            Err(ApiError::Unauthorized { .. })
+        ));
+    }
+
+    /// The endpoint without `alg` declared: the key parameters decide (EC
+    /// P-256 → ES256) — the endpoint does not always declare it.
+    #[tokio::test]
+    async fn a_key_without_alg_resolves_es256_by_its_parameters() {
+        let mut parametered = serde_json::to_value(set()).unwrap();
+        parametered["keys"][0]["alg"] = Value::Null;
+        let set: JwkSet = serde_json::from_value(parametered).unwrap();
+        let verifier = verifier(None);
+        assert!(verifier
+            .verify_against(&token(None, "authenticated"), &set)
+            .is_ok());
+    }
+
+    /// The symmetric fallback: with `alg` declared and by parameters (oct →
+    /// HS256, the legacy way the HS256 test verifier travels in prod).
+    #[tokio::test]
+    async fn a_symmetric_key_falls_back_to_hs256() {
+        let hs_token = hs_token("authenticated");
+        let verifier = verifier(None);
+        assert!(verifier
+            .verify_against(&hs_token, &oct_set(Some("HS256")))
+            .is_ok());
+        assert!(verifier.verify_against(&hs_token, &oct_set(None)).is_ok());
+    }
+
+    /// A key of the set the library cannot decode (an oct with `k` that is
+    /// not base64url): the 500 internal, never a 401 of the world.
+    #[tokio::test]
+    async fn a_corrupt_key_of_the_set_is_internal() {
+        let corrupt: JwkSet =
+            serde_json::from_str(r#"{"keys": [{"kty": "oct", "k": "!!!", "kid": "kid_test"}]}"#)
+                .expect("the corrupt set parses");
+        let verifier = verifier(None);
+        assert!(matches!(
+            verifier.verify_against(&hs_token("authenticated"), &corrupt),
+            Err(ApiError::Internal)
+        ));
+    }
+
+    /// The cold start of the verifier: the empty cache obliges the fetch of
+    /// the endpoint; the second verify with the same `kid` does not touch
+    /// the network again (the cache covers the common case).
+    #[tokio::test]
+    async fn the_cache_covers_the_second_verify() {
+        let (fake, url) = spawn_fake_jwks().await;
+        let verifier = network_verifier(&url);
+        assert!(verifier.verify(&token(None, "authenticated")).await.is_ok());
+        assert_eq!(fake.hits(), 1, "the cold start fetches once");
+        assert!(verifier.verify(&token(None, "authenticated")).await.is_ok());
+        assert_eq!(fake.hits(), 1, "the cache covers the repetition");
+    }
+
+    /// The rotation published another `kid`: the cache does not know it →
+    /// one refetch, and the verifier resolves the new key without re-deploy.
+    #[tokio::test]
+    async fn an_unknown_kid_after_a_rotation_refetches() {
+        let (fake, url) = spawn_fake_jwks().await;
+        let verifier = network_verifier(&url);
+        assert!(verifier.verify(&token(None, "authenticated")).await.is_ok());
+        let mut rotated = serde_json::to_value(set()).unwrap();
+        rotated["keys"][0]["kid"] = Value::String("kid_rotated".into());
+        fake.set_response(200, &rotated.to_string());
+        assert!(verifier
+            .verify(&token_with_kid(Some("kid_rotated"), None, "authenticated"))
+            .await
+            .is_ok());
+        assert_eq!(fake.hits(), 2, "the unknown kid obliges the refetch");
+    }
+
+    /// The endpoint answers 500: the failure of the refresh is a dependency
+    /// problem (503), never a credential one.
+    #[tokio::test]
+    async fn an_internal_error_of_the_endpoint_is_a_dependency_outage() {
+        let (fake, url) = spawn_fake_jwks().await;
+        fake.set_response(500, "outage");
+        let verifier = network_verifier(&url);
+        assert!(matches!(
+            verifier.verify(&token(None, "authenticated")).await,
+            Err(ApiError::DependencyUnavailable)
+        ));
+    }
+
+    /// The endpoint unparsable (200 with garbage): the same dependency 503.
+    #[tokio::test]
+    async fn an_unparsable_set_is_a_dependency_outage() {
+        let (fake, url) = spawn_fake_jwks().await;
+        fake.set_response(200, "this-is-not-a-jwks");
+        let verifier = network_verifier(&url);
+        assert!(matches!(
+            verifier.verify(&token(None, "authenticated")).await,
+            Err(ApiError::DependencyUnavailable)
+        ));
+    }
+
+    /// The endpoint off (the connection refused): the same dependency 503.
+    #[tokio::test]
+    async fn an_off_endpoint_is_a_dependency_outage() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("the ephemeral port opens");
+        let url = format!(
+            "http://{}/jwks.json",
+            listener.local_addr().expect("the bind keeps the address")
+        );
+        drop(listener);
+        let verifier = network_verifier(&url);
+        assert!(matches!(
+            verifier.verify(&token(None, "authenticated")).await,
+            Err(ApiError::DependencyUnavailable)
         ));
     }
 }
