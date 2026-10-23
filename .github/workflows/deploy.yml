@@ -105,13 +105,43 @@ jobs:
         run: |
           set -euo pipefail
           URL="${PUBLIC_URL:-$(terraform output -raw function_endpoint)}"
-          for attempt in $(seq 1 10); do
-            if curl --silent --fail --max-time 10 "$URL/health" | grep --quiet '^ok$'; then
+          FNID=$(terraform output -raw function_id)
+          REGION=$(echo "$FNID" | cut -d/ -f1)
+
+          # The platform compiles the crate AFTER terraform apply returns (a
+          # Rust cold build takes minutes): the smoke first waits for the
+          # build state the API reports — error ends fast, with the cause
+          # instead of 10 blind curls.
+          for attempt in $(seq 1 40); do
+            STATUS=$(curl --silent --max-time 15 \
+              -H "X-Auth-Token: $SCW_SECRET_KEY" \
+              "https://api.scaleway.com/functions/v1beta1/regions/$REGION/functions/$FNID" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status", "unknown"))')
+            case "$STATUS" in
+              ready|healthy)
+                echo "The function build is $STATUS"
+                break
+                ;;
+              error)
+                echo "::error::the function build failed — see the build logs in the Scaleway console (namespace perfil-api-production)"
+                exit 1
+                ;;
+              *)
+                echo "Attempt $attempt: the function build is '$STATUS' — waiting (a Rust cold build takes minutes)"
+                sleep 15
+                ;;
+            esac
+          done
+
+          # The build is ready: the HTTP gate has a small window now — the
+          # function answers ok or the smoke names the problem.
+          for attempt in $(seq 1 6); do
+            if curl --silent --fail --max-time 10 "$URL/health" 2>/dev/null | grep --quiet '^ok$'; then
               echo "The function answers at $URL/health"
               exit 0
             fi
-            echo "Attempt $attempt: the function does not answer yet"
+            echo "Attempt $attempt: /health did not answer ok"
             sleep 5
           done
-          echo "::error::the smoke test failed at $URL/health"
+          echo "::error::the smoke test failed at $URL/health (the build was ready)"
           exit 1
