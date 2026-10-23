@@ -5,6 +5,7 @@
 //! Every query is filtered by `user_id`: the isolation lives in Rust and
 //! the RLS deny-all (D3) is the safety net.
 
+use chrono::Timelike;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -78,9 +79,17 @@ pub async fn update(
     let (_, live_updated_at) = current.ok_or(RepoError::Missing)?;
 
     if let Some(expected) = expected_version {
-        if live_updated_at != expected {
+        // The contract's instant travels truncated to seconds (the
+        // response's format): the DB's precision (micros) never denies an
+        // otherwise equal second — both sides truncate to the contract's
+        // precision for the comparison.
+        let live = live_updated_at
+            .with_nanosecond(0)
+            .unwrap_or(live_updated_at);
+        let expected = expected.with_nanosecond(0).unwrap_or(expected);
+        if live != expected {
             // Nothing written: the transaction rolls back on return.
-            return Err(RepoError::Stale(live_updated_at));
+            return Err(RepoError::Stale(live));
         }
     }
 
@@ -216,6 +225,11 @@ mod tests {
         };
         let first = update(&pool, user, None, patch).await.unwrap();
         let version = first.updated_at;
+
+        // The contract's precision = seconds: the clock leaves the second
+        // of the first write, so the next write REALLY rotates the
+        // version (the truncation is faithful to the response's format).
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
         let patch = ProfileUpdate {
             full_name: "Con la version correcta".to_string(),
