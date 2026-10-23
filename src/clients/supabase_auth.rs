@@ -755,10 +755,9 @@ mod tests {
                 "email-malformed",
             ),
         ] {
-            let (base, _hits, _seen) = canned(move |_| {
-                problem(StatusCode::from_u16(400).expect("valid"), body.clone())
-            })
-            .await;
+            let (base, _hits, _seen) =
+                canned(move |_| problem(StatusCode::from_u16(400).expect("valid"), body.clone()))
+                    .await;
             let result = client(&base).signup("user@mail.com", "Passw0rd1").await;
             assert_eq!(result.unwrap_err().slug(), slug);
         }
@@ -787,9 +786,13 @@ mod tests {
     /// generic internal with the warn of the log (§13.4).
     #[tokio::test]
     async fn an_error_without_shape_resolves_internal() {
-        let (base, _hits, _seen) =
-            canned(move |_| problem(StatusCode::from_u16(400).expect("valid"), serde_json::json!({})))
-                .await;
+        let (base, _hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::from_u16(400).expect("valid"),
+                serde_json::json!({}),
+            )
+        })
+        .await;
         let result = client(&base)
             .sign_in_with_password("user@mail.com", "Passw0rd1")
             .await;
@@ -839,7 +842,7 @@ mod tests {
             .sign_in_with_password("user@mail.com", "Passw0rd1")
             .await
             .unwrap();
-        assert_eq!(session.verified, true, "the legacy name confirms too");
+        assert!(session.verified, "the legacy name confirms too");
 
         // The misconfiguration: a 200 without the shape (no tokens) —
         // internal, never a half-session (FR-003 enforces).

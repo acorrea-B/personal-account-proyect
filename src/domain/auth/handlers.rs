@@ -651,7 +651,10 @@ mod tests {
 
         let (status, body) = login_of(&state, "juan@example.com", "contraseña1").await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-        assert!(body["type"].as_str().expect("type").ends_with("rate-limited"));
+        assert!(body["type"]
+            .as_str()
+            .expect("type")
+            .ends_with("rate-limited"));
         assert!(body["retry_after_seconds"].as_u64().unwrap_or(0) >= 1);
     }
 
