@@ -18,9 +18,10 @@ terraform {
 }
 
 provider "scaleway" {
-  region = var.scw_region
-  # Sin project_id explícito: el provider resuelve el proyecto por defecto
-  # desde el token (SCW_SECRET_KEY).
+  region     = var.scw_region
+  project_id = var.scw_project_id
+  # project_id explícito: con keys de IAM el provider no lo resuelve solo
+  # desde el token (`invalid argument(s): project_id is required`).
 }
 
 locals {
