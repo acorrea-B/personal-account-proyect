@@ -22,12 +22,10 @@ jobs:
     # tag deploys and the manual redeploy are the same destination (D16).
     environment:
       name: production
-    # Only a green CI deploys (the manual dispatch is always allowed) and the
+    # The tag deploys always (the tag is cut on a commit whose CI is green —
+    # that is the discipline of the tag, not a workflow gate: D16) and the
     # forks never deploy.
-    if: >-
-      ${{ github.event.repository.fork == false &&
-      (github.event_name == 'workflow_dispatch' ||
-       github.event.workflow_run.conclusion == 'success') }}
+    if: ${{ github.event.repository.fork == false }}
     env:
       DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
       ENVIRONMENT_NAME: production
