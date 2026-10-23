@@ -19,6 +19,20 @@ use uuid::Uuid;
 
 use crate::errors::ApiError;
 
+/// The retry profile of the endpoint (R7, sharpened by the CI's coverage
+/// of the T021 branch: a network/5xx RETRY of a mutating call whose first
+/// attempt LANDED double-applies the side effect — the account cloned
+/// (the CI's 409 on a fresh email), the FR-008's rotation reading as
+/// reuse, the email window spent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retry {
+    /// Retries the acotated network/5xx failures (R7).
+    Bounded,
+    /// NEVER retries: the unknown outcome answers the contract's
+    /// dependency-unavailable — the honest unknown.
+    Mutating,
+}
+
 /// How the request authenticates against Supabase: the publishable key
 /// (public flows) or the service key (admin).
 #[derive(Debug, Clone, Copy)]
@@ -103,11 +117,13 @@ impl SupabaseAuthClient {
     /// `user` object inside).
     pub async fn signup(&self, email: &str, password: &str) -> Result<(Uuid, bool), ApiError> {
         let response = self
-            .request(
+            .request_with(
                 reqwest::Method::POST,
                 "/auth/v1/signup",
                 Auth::Publishable,
                 Some(json!({ "email": email, "password": password })),
+                None,
+                Retry::Mutating,
             )
             .await?;
 
@@ -144,13 +160,19 @@ impl SupabaseAuthClient {
 
     /// `POST /auth/v1/token?grant_type=refresh_token` (FR-008): renewal of
     /// the session (`invalid-refresh-token` | `refresh-token-reused`).
+    ///
+    /// MUTATING: the renewal ROTATES — a retried attempt whose first one
+    /// landed reads the REUSE of FR-008 (the session dies whole). No
+    /// retries: the unknown outcome answers the dependency's 503.
     pub async fn refresh(&self, refresh_token: &str) -> Result<Session, ApiError> {
         let response = self
-            .request(
+            .request_with(
                 reqwest::Method::POST,
                 "/auth/v1/token?grant_type=refresh_token",
                 Auth::Publishable,
                 Some(json!({ "refresh_token": refresh_token })),
+                None,
+                Retry::Mutating,
             )
             .await?;
         session_of(&response)
@@ -158,12 +180,18 @@ impl SupabaseAuthClient {
 
     /// `POST /auth/v1/resend` (FR-005): the resend of the confirmation;
     /// the handler decides the generic answer (FR-006).
+    ///
+    /// MUTATING: every attempt SENDS an email — a retry spends the
+    /// send-rate window (over_email_send_rate_limit of goTruth) against
+    /// the caller's account.
     pub async fn resend_verification(&self, email: &str) -> Result<(), ApiError> {
-        self.request(
+        self.request_with(
             reqwest::Method::POST,
             "/auth/v1/resend",
             Auth::Publishable,
             Some(json!({ "type": "signup", "email": email })),
+            None,
+            Retry::Mutating,
         )
         .await
         .map(|_| ())
@@ -183,6 +211,7 @@ impl SupabaseAuthClient {
                 Auth::Publishable,
                 None,
                 Some(access_token),
+                Retry::Bounded,
             )
             .await
         {
@@ -204,14 +233,17 @@ impl SupabaseAuthClient {
             Auth::Publishable,
             Some(json!({})),
             Some(access_token),
+            Retry::Bounded,
         )
         .await
         .map(|_| ())
     }
 
-    /// One request with the retries of R7: only the network failures and
-    /// the 5xx retry (2 acotados, backoff fixed); anything else resolves
-    /// in the first response.
+    /// One request with the retries of R7: the bounded profile retries the
+    /// network failures and the 5xx (2 acotados, backoff fixed); anything
+    /// else resolves in the first response. The MUTATING profile never
+    /// retries — the first attempt may have LANDED and the retry would
+    /// apply the side effect twice.
     async fn request(
         &self,
         method: reqwest::Method,
@@ -219,7 +251,8 @@ impl SupabaseAuthClient {
         auth: Auth,
         body: Option<serde_json::Value>,
     ) -> Result<Value, ApiError> {
-        self.request_with(method, path, auth, body, None).await
+        self.request_with(method, path, auth, body, None, Retry::Bounded)
+            .await
     }
 
     async fn request_with(
@@ -229,6 +262,7 @@ impl SupabaseAuthClient {
         auth: Auth,
         body: Option<serde_json::Value>,
         bearer_override: Option<&str>,
+        retry: Retry,
     ) -> Result<Value, ApiError> {
         let key = match auth {
             Auth::Publishable => self.publishable_key.clone(),
@@ -263,8 +297,12 @@ impl SupabaseAuthClient {
 
             match request.send().await {
                 Err(err) => {
-                    // Network failure: retriable but acotado (R7).
-                    if attempt == self.retries {
+                    // The network failure: retriable ONLY in the bounded
+                    // profile — in the mutating one the first attempt may
+                    // have LANDED (the account clones, the FR-008's
+                    // rotation reads as reuse, the email window spends):
+                    // the contract's unknown = the dependency's 503.
+                    if retry == Retry::Mutating || attempt == self.retries {
                         tracing::warn!(error = %err, "Supabase did not answer");
                         return Err(ApiError::DependencyUnavailable);
                     }
@@ -273,8 +311,10 @@ impl SupabaseAuthClient {
                 Ok(response) => {
                     let status = response.status();
                     if status.as_u16() >= 500 {
-                        // Transient of Supabase: retriable but acotado (R7).
-                        if attempt == self.retries {
+                        // Transient of Supabase: retriable but acotado (R7)
+                        // — the mutating profile never retries (the same
+                        // unknown-outcome hazard the network failure has).
+                        if retry == Retry::Mutating || attempt == self.retries {
                             return Err(ApiError::DependencyUnavailable);
                         }
                         tokio::time::sleep(backoff(attempt)).await;
@@ -855,6 +895,77 @@ mod tests {
                 .await;
             assert_eq!(result.unwrap_err().slug(), "rate-limited");
         }
+    }
+
+    /// The MUTATING profile (sharpened by the CI's failure of the T021
+    /// branch): the signup whose first attempt TIMED OUT never retries —
+    /// the retry would read the account the first attempt LANDED (the
+    /// CI's 409 on a fresh email) or double the side effect. The unknown
+    /// outcome = the dependency's 503 with exactly ONE attempt served.
+    #[tokio::test]
+    async fn the_signup_never_retries_the_network_failure() {
+        let (base, hits, _seen) = canned(move |hit| {
+            if hit == 0 {
+                // The first attempt stalls past the client's timeout.
+                std::thread::sleep(Duration::from_millis(150));
+                (StatusCode::OK, Json(session_user())).into_response()
+            } else {
+                problem(
+                    StatusCode::from_u16(422).expect("valid"),
+                    serde_json::json!({
+                        "code": 422, "error_code": "user_already_exists",
+                        "msg": "User already registered"
+                    }),
+                )
+            }
+        })
+        .await;
+
+        let error = SupabaseAuthClient::new(
+            &base,
+            "test-publishable",
+            "test-service-key",
+            Duration::from_millis(50),
+        )
+        .signup("user@mail.com", "Passw0rd1")
+        .await
+        .unwrap_err();
+        assert_eq!(error.slug(), "dependency-unavailable");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "no retry served (only timeout)"
+        );
+    }
+
+    /// The 5xx of a MUTATING call never retries either (the same
+    /// unknown-outcome hazard: a gateway 504 can answer AFTER the upstream
+    /// committed — the retry would double the side effect).
+    #[tokio::test]
+    async fn the_mutating_5xx_answers_the_dependency_without_retry() {
+        let (base, hits, _seen) = canned(move |_| {
+            problem(
+                StatusCode::from_u16(503).expect("valid"),
+                serde_json::json!({}),
+            )
+        })
+        .await;
+
+        let error = SupabaseAuthClient::new(
+            &base,
+            "test-publishable",
+            "test-service-key",
+            Duration::from_millis(50),
+        )
+        .signup("user@mail.com", "Passw0rd1")
+        .await
+        .unwrap_err();
+        assert_eq!(error.slug(), "dependency-unavailable");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "no retry on the mutating 5xx"
+        );
     }
 
     /// An error document WITHOUT a recognized shape (either dialect): the
