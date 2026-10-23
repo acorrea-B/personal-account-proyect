@@ -9,11 +9,13 @@
 //! dependency failures.
 
 use axum::{
+    response::{IntoResponse, Response},
     routing::{get, post, put},
     Router,
 };
 
 use crate::domain::{auth, cv, profile};
+use crate::errors::{ApiError, Problem};
 use crate::state::AppState;
 
 use auth::handlers;
@@ -65,6 +67,20 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/auth/refresh", post(handlers::refresh))
         .merge(protected)
         .with_state(state)
+        // Every route that misses answers the catalogue's not-found —
+        // NEVER axum's empty body (the contract speaks problem+json for
+        // everything; the unknown route too).
+        .fallback(unknown_route)
+}
+
+/// The unknown route: the catalogue's not-found with the requested path
+/// as the `instance` — the contract's document, never a bare 404.
+async fn unknown_route(axum::extract::OriginalUri(uri): axum::extract::OriginalUri) -> Response {
+    Problem::new(ApiError::NotFound {
+        detail: "The route does not exist.".to_string(),
+    })
+    .on(uri.path())
+    .into_response()
 }
 
 #[cfg(test)]
@@ -230,5 +246,41 @@ mod tests {
             document["type"],
             "https://api.example.com/errors/token-expired"
         );
+    }
+
+    /// The ROUTE that misses (a typo, the client's invented query — the
+    /// versions' trailing-slash included): the catalogue's not-found with
+    /// the real path as the instance — never axum's empty body.
+    #[tokio::test]
+    async fn an_unknown_route_answers_the_catalogue_not_found() {
+        let router = build_router(AppState::for_tests());
+
+        let response = router
+            .oneshot(
+                Request::get("/v1/cv/versions/?%3Aid=758c7b30")
+                    .body(Body::empty())
+                    .expect("the request is valid"),
+            )
+            .await
+            .expect("the router never fails");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/problem+json")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("complete");
+        let document: serde_json::Value = serde_json::from_slice(&body).expect("problem JSON");
+        assert!(
+            document["type"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("not-found")),
+            "the catalogue's slug answers"
+        );
+        assert_eq!(document["instance"], "/v1/cv/versions/");
     }
 }
