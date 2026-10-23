@@ -57,7 +57,7 @@ pub fn build_router(state: AppState) -> Router {
     // Protected: every handler takes `AuthenticatedUser`, so an anonymous
     // request is rejected before reaching the handler (deny-by-default).
     let protected = Router::new()
-        .route("/v1/auth/revoke", post(stub_protected_503))
+        .route("/v1/auth/revoke", post(handlers::revoke))
         .route("/v1/profile", get(stub_protected_503))
         .route("/v1/profile", put(stub_protected_503))
         .route("/v1/cv/text", post(stub_protected_503))
