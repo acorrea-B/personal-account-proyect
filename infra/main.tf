@@ -40,6 +40,14 @@ locals {
     CV_MAX_BYTES                 = var.cv_max_bytes
     CV_VERSIONS_RETENTION        = var.cv_versions_retention
   }
+
+  # Etiquetas de los recursos (buena práctica de infra: costo, filtrado y
+  # trazabilidad). Scaleway usa tags planos key=value.
+  function_tags = [
+    "project=perfil-api",
+    "stage=${var.stage}",
+    "managed-by=terraform",
+  ]
 }
 
 # Un namespace: `perfil-api-production` (D16 — staging no existe).
@@ -48,6 +56,7 @@ resource "scaleway_function_namespace" "perfil" {
   region = var.scw_region
 
   environment_variables = local.function_environment
+  tags                  = local.function_tags
 }
 
 # La función `api` en sí. Sin secret_environment_variables declaradas a
@@ -70,4 +79,6 @@ resource "scaleway_function" "api" {
 
   zip_file = "${path.module}/function.zip"
   zip_hash = filesha256("${path.module}/function.zip")
+
+  tags = local.function_tags
 }
